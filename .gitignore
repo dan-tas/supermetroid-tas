@@ -1,3 +1,12 @@
+# Eclipse
+*.classpath
+*.project
+**/bin
+
+# Maven
+**/target
+
+
 # Compiled class file
 *.class
 
