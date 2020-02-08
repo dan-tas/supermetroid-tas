@@ -11,20 +11,20 @@ class LcgRngServiceImplTest {
   private LcgRngServiceImpl lcgRngService = new LcgRngServiceImpl();
 
   @Test void simpleRngCalculationNoCarry() {
-  int currRng = 0x1111;
-  int nextRng = lcgRngService.advanceRng(currRng);
+    int currRng = 0x1111;
+    int nextRng = lcgRngService.advanceRng(currRng);
 
-  assertFalse(lcgRngService.hasCarry(currRng));
-  assertEquals(0x5555 + 0x0111 + 0, nextRng);
+    assertFalse(lcgRngService.hasCarry(currRng));
+    assertEquals(0x5555 + 0x0111 + 0, nextRng);
   }
 
   @Test void simpleRngCalculationWithCarryValueTruncated() {
-  int currRng = 0x3333;
-  int nextRng = lcgRngService.advanceRng(currRng);
+    int currRng = 0x3333;
+    int nextRng = lcgRngService.advanceRng(currRng);
 
-  assertTrue(lcgRngService.hasCarry(currRng));
-  assertNotEquals(0x10111, nextRng);
-  assertEquals(0x0111, nextRng);
+    assertTrue(lcgRngService.hasCarry(currRng));
+    assertNotEquals(0x10111, nextRng);
+    assertEquals(0x0111, nextRng);
   }
 
   @Test void specificCarryRng() {
@@ -34,7 +34,6 @@ class LcgRngServiceImplTest {
     assertTrue(lcgRngService.hasCarry(currRng));
     assertNotEquals(0x10012, nextRng);
     assertEquals(0x0012, nextRng);
-
   }
 
   @Test void cannotGetSpecificRngOutput() {
@@ -57,11 +56,9 @@ class LcgRngServiceImplTest {
     assertCannotGetRngValueOut((0x0030 + (0x3333 * 5) + 1), 0x0201);
   }
   private void assertCannotGetRngValueOut(int currRng, int expectedRngOutput) {
-    int disjointRng = 0x0202;
-
     int nextRng = lcgRngService.advanceRng(currRng);
 
-    assertNotEquals(disjointRng, nextRng);
+    assertNotEquals(0x0202, nextRng);
     assertEquals(expectedRngOutput, nextRng);
   }
 }
