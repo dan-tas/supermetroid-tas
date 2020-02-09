@@ -8,7 +8,7 @@
   </parent>
   <artifactId>snes-supermetroid</artifactId>
   <packaging>jar</packaging>
-  
+
   <dependencies>
     <dependency>
       <groupId>com.github.dan-tas</groupId>

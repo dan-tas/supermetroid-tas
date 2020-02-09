@@ -1,13 +1,13 @@
 package com.github.dan_tas.tas.framework.solver.demo;
 
+import java.util.HashSet;
 import java.util.Set;
-import java.util.TreeSet;
 
 import com.github.dan_tas.tas.framework.solver.InputProcessor;
 
 public class TestDataInputProcessorImpl implements InputProcessor<TestData> {
   @Override public Set<TestData> process(TestData in) {
-    Set<TestData> outputs = new TreeSet<>();
+    Set<TestData> outputs = new HashSet<>();
 
     int sum1 = in.getSum() - in.getAdjust();
     int sum2 = in.getSum() + in.getAdjust();

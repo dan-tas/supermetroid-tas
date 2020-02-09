@@ -9,7 +9,7 @@ import lombok.NoArgsConstructor;
 @Builder(toBuilder = true)
 @NoArgsConstructor
 @AllArgsConstructor
-public class MB2FightData implements Comparable<MB2FightData> {
+public class MB2FightData {
   private int frame;
   private int memory0CD0; // charge counter, can fire charge shot when >= 0x003C. I repurposed the upper byte to be a counter, if greater than 0, then a shot charge shot can hit MB2.
 
@@ -30,8 +30,4 @@ public class MB2FightData implements Comparable<MB2FightData> {
   private int memory0AFA; // Samus    Y pixel, can make french fry attack more likely when Samus is up near MB2's head
   private int memory0A1F; // Samus pose (only the lower byte 0A1F && 0x00FF is used)
   private String comments; // Any comments to write out but not read in
-
-  @Override public int compareTo(MB2FightData arg0) {
-    return Integer.compare(this.hashCode(), arg0.hashCode());
-  }
 }

@@ -3,8 +3,6 @@ package com.github.dan_tas.snes.supermetroid.enemy.motherbrain;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
-import java.util.SortedSet;
-import java.util.TreeSet;
 
 import com.github.dan_tas.snes.supermetroid.rng.RngService;
 
@@ -68,7 +66,7 @@ public class MB2FightInputProcessorImpl implements InputProcessor<MB2FightData> 
       }
     }
 
-    Set<MB2FightData> outputs = new TreeSet<>();
+    Set<MB2FightData> outputs = new HashSet<>();
     switch(input.getMemory0FA8()) {
       case 0x8EAA:
         // this is a hack to get this working
@@ -129,7 +127,7 @@ public class MB2FightInputProcessorImpl implements InputProcessor<MB2FightData> 
     }
 
     // manage charge shot counter and the delay before MB2 takes damage
-    SortedSet<MB2FightData> updatedOutputs = new TreeSet<>();
+    Set<MB2FightData> updatedOutputs = new HashSet<>();
     for (MB2FightData output : outputs) {
       int chargeCounter = output.getMemory0CD0() & 0x00FF;
       if (chargeCounter == 0x003C) { // changed from 0x003D since the increment does not happen early

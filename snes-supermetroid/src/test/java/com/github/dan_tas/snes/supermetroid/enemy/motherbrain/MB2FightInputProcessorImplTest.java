@@ -85,13 +85,13 @@ class MB2FightInputProcessorImplTest {
 
     MB2FightData output1 = outputIterators.next();
     assertEquals(0x8F33, output1.getMemory0FA8());
-    assertEquals(0x2DB4, output1.getMemory0FCC());
+    assertEquals(0x3138, output1.getMemory0FCC());
 
     MB2FightData output2 = outputIterators.next();
     assertEquals(0x8F33, output2.getMemory0FA8());
-    assertEquals(0x3138, output2.getMemory0FCC());
+    assertEquals(0x2DB4, output2.getMemory0FCC());
 
-    Set<MB2FightData> nextFrame = mb2InputProcessor.process(output1);
+    Set<MB2FightData> nextFrame = mb2InputProcessor.process(output2);
     Iterator<MB2FightData> outputIterators2 = nextFrame.iterator();
     while(outputIterators2.hasNext()) {
       MB2FightData output2ndFrame = outputIterators2.next();
@@ -171,25 +171,24 @@ class MB2FightInputProcessorImplTest {
     assertEquals(0x0001, output2.getMemory7830());
 
     MB2FightData output3 = outputIterators.next();
-    assertEquals(0xB64B, output3.getMemory0FA8());
+    assertEquals(0xB839, output3.getMemory0FA8());
     assertEquals(0x0040, output3.getMemory0FB4());
     assertEquals(0x0001, output3.getMemory7830());
 
     MB2FightData output4 = outputIterators.next();
-    assertEquals(0xB839, output4.getMemory0FA8());
+    assertEquals(0xB64B, output4.getMemory0FA8());
     assertEquals(0x0040, output4.getMemory0FB4());
     assertEquals(0x0001, output4.getMemory7830());
 
     MB2FightData output5 = outputIterators.next();
-    assertEquals(0xB839, output5.getMemory0FA8());
+    assertEquals(0xB64B, output5.getMemory0FA8());
     assertEquals(0x0040, output5.getMemory0FB4());
     assertEquals(0x0001, output5.getMemory7830());
 
     MB2FightData output6 = outputIterators.next();
-    assertEquals(0xB64B, output6.getMemory0FA8());
+    assertEquals(0xB839, output6.getMemory0FA8());
     assertEquals(0x0040, output6.getMemory0FB4());
     assertEquals(0x0001, output6.getMemory7830());
-
   }
 
   @Test void debug0009_test64FrameCountdown() {
@@ -300,14 +299,14 @@ class MB2FightInputProcessorImplTest {
     Iterator<MB2FightData> outputIterators = outputs.iterator();
 
     MB2FightData output1 = outputIterators.next();
-    assertEquals(0xB64B, output1.getMemory0FA8());
-    assertEquals(0xFFFD, output1.getMemory0F94());
+    assertEquals(0xB7C6, output1.getMemory0FA8());
+    assertEquals(0x0118, output1.getMemory0F94());
     assertEquals(0x0019, output1.getMemory780E());
     assertEquals(0x0001, output1.getMemory7830());
 
     MB2FightData output2 = outputIterators.next();
-    assertEquals(0xB7C6, output2.getMemory0FA8());
-    assertEquals(0x0118, output2.getMemory0F94());
+    assertEquals(0xB64B, output2.getMemory0FA8());
+    assertEquals(0xFFFD, output2.getMemory0F94());
     assertEquals(0x0019, output2.getMemory780E());
     assertEquals(0x0001, output2.getMemory7830());
   }
@@ -327,10 +326,10 @@ class MB2FightInputProcessorImplTest {
     Iterator<MB2FightData> outputIterators = outputs.iterator();
 
     MB2FightData output1 = outputIterators.next();
-    assertEquals(0x0000, output1.getMemory7804());
-    assertEquals(0xB64B, output1.getMemory0FA8());
+    assertEquals(0x0002, output1.getMemory7804());
+    assertEquals(0xB7C6, output1.getMemory0FA8());
     assertEquals(0x0040, output1.getMemory0FB4());
-    assertEquals(0xFF03, output1.getMemory0F94());
+    assertEquals(0x0118, output1.getMemory0F94());
     assertEquals(0x0007, output1.getMemory780E());
     assertEquals(0x0001, output1.getMemory7830());
 
@@ -343,11 +342,11 @@ class MB2FightInputProcessorImplTest {
     assertEquals(0x0001, output2.getMemory7830());
 
     MB2FightData output3 = outputIterators.next();
-    assertEquals(0x0002, output3.getMemory7804());
-    assertEquals(0xB7C6, output3.getMemory0FA8());
+    assertEquals(0x0000, output3.getMemory7804());
+    assertEquals(0xB64B, output3.getMemory0FA8());
     assertEquals(0x0040, output3.getMemory0FB4());
-    assertEquals(0x0118, output3.getMemory0F94());
-    assertEquals(0x0000, output3.getMemory780E());
+    assertEquals(0xFF03, output3.getMemory0F94());
+    assertEquals(0x0007, output3.getMemory780E());
     assertEquals(0x0001, output3.getMemory7830());
 
     MB2FightData output4 = outputIterators.next();
@@ -355,7 +354,7 @@ class MB2FightInputProcessorImplTest {
     assertEquals(0xB7C6, output4.getMemory0FA8());
     assertEquals(0x0040, output4.getMemory0FB4());
     assertEquals(0x0118, output4.getMemory0F94());
-    assertEquals(0x0007, output4.getMemory780E());
+    assertEquals(0x0000, output4.getMemory780E());
     assertEquals(0x0001, output4.getMemory7830());
   }
 

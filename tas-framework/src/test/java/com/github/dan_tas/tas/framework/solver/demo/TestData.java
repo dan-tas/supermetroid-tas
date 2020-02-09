@@ -5,11 +5,7 @@ import lombok.Data;
 
 @Data
 @AllArgsConstructor
-public class TestData implements Comparable<TestData> {
+public class TestData {
   private int adjust;
   private int sum;
-
-  @Override public int compareTo(TestData arg0) {
-  return Integer.compare(this.hashCode(), arg0.hashCode());
-  }
 }
