@@ -1,6 +1,6 @@
 --[[
 reset-lua
-run-lua run-lua src\test\resources\rng-logger\lsnes-rng-logger.lua
+run-lua src\test\resources\rng-logger\lsnes-rng-logger.lua
 ]]--
 
 function on_frame()
