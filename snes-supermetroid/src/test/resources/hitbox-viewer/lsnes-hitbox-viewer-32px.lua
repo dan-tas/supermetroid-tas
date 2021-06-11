@@ -1,550 +1,777 @@
 --[[
 reset-lua
-run-lua src\test\resources\rng-logger\lsnes-rng-logger.lua
+run-lua src\test\resources\hitbox-viewer\lsnes-hitbox-viewer-32px.lua
 ]]
 
--- TASFlag = 0;
-DebugFlag = 0;
+local DEBUG_FLAG = false;
 
+local WRAM = 'WRAM';
+local ROM = 'ROM';
+
+-- Each bank is from 0x8000 to 0xFFFF so remove one extra 0x8000
+local BANK_OFFSET_86 = bit.lshift((0x86 - 0x80 - 0x01), 15);
+local BANK_OFFSET_A0 = bit.lshift((0xA0 - 0x80 - 0x01), 15);
+
+local BLOCK_SIZE = 0x10;
+local BLOCK_SIZE_DISPLAY = 2 * BLOCK_SIZE;
+
+local SCREEN_X_ENEMY_SUMMARY = 2 * 0xE0;
+
+local SCREEN_X_BLOCKS_HALF = 8;
+local SCREEN_X_BLOCKS_DISPLAY = (2 * SCREEN_X_BLOCKS_HALF) + 1;
+local SCREEN_X_HALF = SCREEN_X_BLOCKS_HALF * BLOCK_SIZE;
+local SCREEN_X_DISPLAY = 2 * 2 * SCREEN_X_HALF;
+
+local SCREEN_Y_BLOCKS_HALF = 7;
+local SCREEN_Y_BLOCKS_DISPLAY = (2 * SCREEN_Y_BLOCKS_HALF) + 1;
+local SCREEN_Y_HALF = SCREEN_Y_BLOCKS_HALF * BLOCK_SIZE;
+local SCREEN_Y_FULL = 2 * SCREEN_Y_HALF;
+
+local BLOCKS_DISPLAY = (SCREEN_X_BLOCKS_DISPLAY * SCREEN_Y_BLOCKS_DISPLAY);
+
+local ENEMY_HEALTH_BAR_WIDTH = 2 * 0x20;
+local ENEMY_HEALTH_BAR_HEIGHT = 2 * 3;
+
+
+local COLOR_TRANSPARENT = -1; -- -1 is transparent for fill color, not sure this also works for border color
+
+local COLOR_ROOM_LIQUID_WATER = 0x2020E0;
+local COLOR_ROOM_LIQUID_LAVA = 0xA0A000;
+local COLOR_ROOM_LIQUID_ACID = 0xA05080; -- purple/gray because red is hard to see against red solid blocks
+
+local COLOR_ROOM_BLOCK_BOMB = 0x0000FF;
+local COLOR_ROOM_BLOCK_CRUMBLE = 0x0000FF;
+local COLOR_ROOM_BLOCK_DOOR = 0xFFA500;
+local COLOR_ROOM_BLOCK_EXTENSION = 0xFF00FF;
+local COLOR_ROOM_BLOCK_EXTENSION_DEFAULT = 0xC0C0C0;
+local COLOR_ROOM_BLOCK_GRAPPLE = 0x0000FF;
+local COLOR_ROOM_BLOCK_NORMAL = 0xFF0000;
+local COLOR_ROOM_BLOCK_SHOT = 0x0000FF;
+local COLOR_ROOM_BLOCK_SLOPE = 0xFFFF00;
+local COLOR_ROOM_BLOCK_SPIKE = 0x0000FF;
+local COLOR_ROOM_BLOCK_TRANSITION = 0x00FFFF;
+local COLOR_ROOM_BLOCK_TREADMILL = 0x80FF40;
+
+local COLOR_ROOM_DEBUG_BLOCK_TYPE = 0xFF0000;
+local COLOR_ROOM_DEBUG_BLOCK_PROPS = 0xFFA500;
+
+local COLOR_ENEMY = 0x808080;
+local COLOR_ENEMY_HEALTH_BAR = 0x606060;
+local COLOR_ENEMY_PROJECTILE = 0x00FF00; -- includes item drops
+
+local COLOR_SAMUS_PROJECTILES = 0xFFFF80;
+local COLOR_SAMUS_BOMBS = 0xFFFF80;
+
+local COLOR_SAMUS_HITBOX_FASTEST = 0x00FF00;
+local COLOR_SAMUS_HITBOX_FASTER  = 0x80FFFF;
+local COLOR_SAMUS_HITBOX_AVERAGE = 0xFF8000;
+local COLOR_SAMUS_HITBOX_SLOWER  = 0xFF0000;
+local COLOR_SAMUS_HITBOX_SLOWEST = 0x800000;
+
+local SAMUS_X_LAST = 0x00000000;
+local SAMUS_X_NEXT = 0x00000000;
+function on_frame()
+  SAMUS_X_LAST = samus_x_position();
+end;
+function on_frame_emulated()
+  SAMUS_X_NEXT = samus_x_position();
+end;
+function samus_x_position()
+  return (bit.lshift(memory.readword(WRAM, 0x0AF6), 0x10) + memory.readword(WRAM, 0x0AF8));
+end;
+
+function on_paint()
+  if (draw_everything())
+  then
+    local samusX = memory.readword(WRAM, 0x0AF6);
+    local samusY = memory.readword(WRAM, 0x0AFA);
+
+    local cameraX = (samusX - SCREEN_X_HALF);
+    local cameraY = (samusY - SCREEN_Y_HALF);
+
+    draw_room(cameraX, cameraY, samusX, samusY);
+    draw_enemies(cameraX, cameraY);
+    draw_samus(cameraX, cameraY);
+  end;
+end;
+function draw_everything()
+  local emulatorSpeed = settings.get_speed();
+  local fastForward = (((type(emulatorSpeed) == "number") and (emulatorSpeed > 1.5)) or (type(emulatorSpeed) == "string")) -- "turbo"
+  if (fastForward)
+  then
+    return false;
+  end;
+
+  local gameMode = memory.readbyte(WRAM, 0x0998);
+  return ((gameMode == 0x08) or (gameMode == 0x09) or (gameMode == 0x1B)) -- active gameplay, hit door transition, or reserve tanks emptying
+end;
+
+ function draw_room(cameraX, cameraY, samusX, samusY)
+  draw_room_tiles(cameraX, cameraY, samusX, samusY);
+  draw_room_liquid_level(cameraY);
+end;
+function draw_room_liquid_level(cameraY)
+  local liquidLevelAbsolute;
+  local liquidColor;
+
+  local fxType = memory.readbyte(WRAM, 0x196E);
+  if ((bit.band(fxType, 0xF9) == 0x00) and (bit.band(fxType, 0x06) ~= 0x00))
+  then
+    if (fxType == 0x06)
+    then
+      liquidLevelAbsolute = memory.readword(WRAM, 0x195E);
+      liquidColor = COLOR_ROOM_LIQUID_WATER;
+    else
+      liquidLevelAbsolute = memory.readword(WRAM, 0x1962);
+      if (fxType == 0x04)
+      then
+        liquidColor = COLOR_ROOM_LIQUID_ACID;
+      else
+        liquidColor = COLOR_ROOM_LIQUID_LAVA;
+      end;
+    end;
+
+    liquidLevelRelative = bit.lshift((liquidLevelAbsolute - cameraY), 1);
+    gui.line(0, liquidLevelRelative, SCREEN_X_DISPLAY, liquidLevelRelative, liquidColor);
+  end;
+end;
+function draw_room_tiles(cameraX, cameraY, samusX, samusY)
+  local cameraOffsetX = bit.lshift(bit.band(cameraX, 0x000F), 1);
+  local cameraOffsetY = bit.lshift(bit.band(cameraY, 0x000F), 1);
+
+  local samusBlockX = bit.lrshift(samusX, 4);
+  local samusBlockY = bit.lrshift(samusY, 4);
+
+  local roomWidth = memory.readword(WRAM, 0x07A5);
+  local samusBlockOffset = ((roomWidth * samusBlockY) + samusBlockX);
+
+  local dataOffset = (bit.lrshift(roomWidth, 4) + 1);
+  local cameraBlockOffset = (bit.lshift((roomWidth + 1), 3) - bit.lshift(dataOffset, 4)); -- 16 = (SCREEN_X_BLOCKS_DISPLAY - 1)
+
+  local blockOffset = (samusBlockOffset - cameraBlockOffset);
+  local blockRowOffset = roomWidth - (SCREEN_X_BLOCKS_DISPLAY - 1);
+
+
+  local cameraBlockX = bit.band((samusBlockX - SCREEN_X_BLOCKS_HALF), 0xFFF);
+  local cameraBlockY = bit.band((samusBlockY - SCREEN_Y_BLOCKS_HALF), 0xFFF);
+  gui.text(0, 0, string.format("camera: <%03X,%03X>\noffset: %05X", cameraBlockX, cameraBlockY, bit.band(blockOffset, 0xFFFFF)));
+
+  local cameraTileOffsetX = -cameraOffsetX;
+  local cameraTileOffsetY = -cameraOffsetY;
+  for cameraTileNumber=0,(BLOCKS_DISPLAY - 1)
+  do
+    draw_room_tile(cameraTileOffsetX, cameraTileOffsetY, blockOffset, roomWidth);
+
+    if ((cameraTileNumber % SCREEN_X_BLOCKS_DISPLAY) ~= 0)
+    then
+      cameraTileOffsetX = cameraTileOffsetX + BLOCK_SIZE_DISPLAY;
+      blockOffset = blockOffset + 1;
+    else
+      cameraTileOffsetX = -cameraOffsetX;
+      cameraTileOffsetY = cameraTileOffsetY + BLOCK_SIZE_DISPLAY;
+      blockOffset = blockOffset + blockRowOffset;
+    end;
+  end
+end;
+
+function draw_room_tile(cameraTileOffsetX, cameraTileOffsetY, blockOffset, roomWidth)
+  local blockType = block_type(blockOffset);
+  local blockProperties = block_properties(blockOffset);
+
+  if (DEBUG_FLAG or (blockType == 0x02) or (blockType == 0x09))
+  then
+    gui.text(cameraTileOffsetX+8, cameraTileOffsetY+1, string.format("%02X", blockType) , COLOR_ROOM_DEBUG_BLOCK_TYPE);
+    gui.text(cameraTileOffsetX+8, cameraTileOffsetY+12, string.format("%02X", blockProperties), COLOR_ROOM_DEBUG_BLOCK_PROPS);
+  end
+
+  local blockColor = block_color[blockType](blockProperties, blockOffset, roomWidth, 12);
+  if ((blockType == 0x01) or (blockType == 0x05) or (blockType == 0x0D))
+  then
+    if (blockType == 0x01)
+    then -- slope tile
+      local vFlip = bit.test(blockProperties, 7);
+      local hFlip = bit.test(blockProperties, 6);
+
+      local sf = bit.band(blockProperties, 0x1F);
+      slope[sf](cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip);
+    else -- extender tile
+      draw_tile_boundaries(cameraTileOffsetX, cameraTileOffsetY, blockColor);
+      draw_tile_nested(cameraTileOffsetX, cameraTileOffsetY, COLOR_ROOM_BLOCK_EXTENSION);
+    end;
+  else
+    if ((blockType ~= 0x00) and (blockType ~= 0x02) and (blockType ~= 0x06) and (blockType ~= 0x07)) -- these four are unused or nothing to draw
+    then
+      draw_tile_boundaries(cameraTileOffsetX, cameraTileOffsetY, blockColor);
+      if (blockType == 0x08) -- solid tile
+      then
+        draw_tile_nested(cameraTileOffsetX, cameraTileOffsetY, blockColor);
+      end;
+    end;
+  end;
+end;
+
+block_color = {
+  [0x00] = function () return COLOR_TRANSPARENT          ; end, -- Air
+  [0x01] = function () return COLOR_ROOM_BLOCK_SLOPE     ; end, -- Slope
+  [0x02] = function () return COLOR_TRANSPARENT          ; end, -- Air, tricks X-ray
+  [0x03] = function () return COLOR_ROOM_BLOCK_TREADMILL ; end, -- Treadmill
+  [0x04] = function () return COLOR_TRANSPARENT          ; end, -- unused?
+  [0x05] = function (blockProperties, blockOffset, roomWidth, recursiveCount) -- Horizontal extend
+    if (recursiveCount == 0x00)
+    then
+      return COLOR_ROOM_BLOCK_EXTENSION_DEFAULT; -- Without a halting condition, these blocks can loop infinitely
+    end;
+
+    local relativeBlockOffset = (blockOffset + sign_extend_byte(blockProperties));
+
+    local relativeBlockType = block_type(relativeBlockOffset);
+    local relativeBlockProperties = block_properties(relativeBlockOffset);
+
+    return block_color[relativeBlockType](relativeBlockProperties, relativeBlockOffset, roomWidth, (recursiveCount - 1));
+  end,
+  [0x06] = function () return COLOR_TRANSPARENT          ; end, -- unused?
+  [0x07] = function () return COLOR_TRANSPARENT          ; end, -- unused?
+  [0x08] = function () return COLOR_ROOM_BLOCK_NORMAL    ; end, -- Normal block
+  [0x09] = function () return COLOR_ROOM_BLOCK_TRANSITION; end, -- Transition block
+  [0x0A] = function () return COLOR_ROOM_BLOCK_SPIKE     ; end, -- Spike block
+  [0x0B] = function () return COLOR_ROOM_BLOCK_CRUMBLE   ; end, -- Crumble block
+  [0x0C] = function (blockProperties, blockOffset, roomWidth) -- Shot block
+    if ((0x40 <= blockProperties) and (blockProperties <= 0x43))
+    then
+        return COLOR_ROOM_BLOCK_DOOR;
+      else
+        return COLOR_ROOM_BLOCK_SHOT;
+      end;
+  end,
+  [0x0D] = function (blockProperties, blockOffset, roomWidth, recursiveCount) -- Vertical extend
+    if (recursiveCount == 0x00)
+    then
+      return COLOR_ROOM_BLOCK_EXTENSION_DEFAULT;
+    end;
+
+    local relativeBlockOffset = (blockOffset + (sign_extend_byte(blockProperties) * roomWidth));
+    local relativeBlockType = block_type(relativeBlockOffset);
+    local relativeBlockProperties = block_properties(relativeBlockOffset);
+
+    return block_color[relativeBlockType](relativeBlockProperties, relativeBlockOffset, roomWidth, (recursiveCount -1));
+  end,
+  [0x0E] = function () return COLOR_ROOM_BLOCK_GRAPPLE   ; end, -- Grapple block
+  [0x0F] = function () return COLOR_ROOM_BLOCK_BOMB      ; end  -- Bomb block
+}
+function block_type(blockOffset)
+  local clipOffset = bit.band(0x10002 + bit.lshift(blockOffset, 1), 0xFFFFF);
+  local blockDefinition = memory.readword(WRAM, clipOffset);
+  return bit.lrshift(blockDefinition, 0x0C);
+end;
+function block_properties(blockOffset)
+  local btsOffset = bit.band((0x16402 + blockOffset), 0xFFFFF);
+  return memory.readbyte(WRAM, btsOffset);
+end;
+function sign_extend_byte(byte)
+  if (bit.test(byte, 7))
+  then
+    return (0xFFFFFFFFFFFFFF00 + byte)
+  else
+    return byte;
+  end;
+end;
+
+function draw_tile_boundaries(cameraTileOffsetX, cameraTileOffsetY, blockColor)
+  gui.line(cameraTileOffsetX+     0x1F        , cameraTileOffsetY+     0x1F        , cameraTileOffsetX+     0x00        , cameraTileOffsetY+     0x1F        , blockColor);
+  gui.line(cameraTileOffsetX+     0x00        , cameraTileOffsetY+     0x1F        , cameraTileOffsetX+     0x00        , cameraTileOffsetY+     0x00        , blockColor);
+  gui.line(cameraTileOffsetX+     0x00        , cameraTileOffsetY+     0x00        , cameraTileOffsetX+     0x1F        , cameraTileOffsetY+     0x00        , blockColor);
+  gui.line(cameraTileOffsetX+     0x1F        , cameraTileOffsetY+     0x00        , cameraTileOffsetX+     0x1F        , cameraTileOffsetY+     0x1F        , blockColor);
+end;
+function draw_tile_nested(cameraTileOffsetX, cameraTileOffsetY, blockColor)
+  gui.line(cameraTileOffsetX+     0x1C        , cameraTileOffsetY+     0x1C        , cameraTileOffsetX+     0x03        , cameraTileOffsetY+     0x1C        , blockColor);
+  gui.line(cameraTileOffsetX+     0x03        , cameraTileOffsetY+     0x1C        , cameraTileOffsetX+     0x03        , cameraTileOffsetY+     0x03        , blockColor);
+  gui.line(cameraTileOffsetX+     0x03        , cameraTileOffsetY+     0x03        , cameraTileOffsetX+     0x1C        , cameraTileOffsetY+     0x03        , blockColor);
+  gui.line(cameraTileOffsetX+     0x1C        , cameraTileOffsetY+     0x03        , cameraTileOffsetX+     0x1C        , cameraTileOffsetY+     0x1C        , blockColor);
+end;
+function default_slope(cameraTileOffsetX, cameraTileOffsetY, vFlip)
+  draw_tile_boundaries(cameraTileOffsetX, cameraTileOffsetY, COLOR_ROOM_BLOCK_SLOPE);
+
+  gui.line(cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x04, vFlip), cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x04, vFlip), COLOR_ROOM_BLOCK_SLOPE);
+end;
 function flip(pixel, flip)
-  if flip == 0
+  if (not flip)
   then
     return pixel;
   else
-    return 0x1F - pixel;
+    return (0x1F - pixel);
   end;
 end;
-function draw_tile_boundaries(TileX, TileY, color)
-  gui.line(TileX+     0x1F        , TileY+     0x1F        , TileX+     0x00        , TileY+     0x1F        , color);
-  gui.line(TileX+     0x00        , TileY+     0x1F        , TileX+     0x00        , TileY+     0x00        , color);
-  gui.line(TileX+     0x00        , TileY+     0x00        , TileX+     0x1F        , TileY+     0x00        , color);
-  gui.line(TileX+     0x1F        , TileY+     0x00        , TileX+     0x1F        , TileY+     0x1F        , color);
-end;
-function default_slope(TileX, TileY, VFlip)
-  draw_tile_boundaries(TileX, TileY, slope_color);
-
-  gui.line(TileX+     0x00        , TileY+flip(0x04, VFlip), TileX+     0x1F        , TileY+flip(0x04, VFlip), slope_color);
-end;
-
-slope_color = 0x00FF00;
 slope = {
-    [0x00] = function () -- 1/2 tile rectangle, 100% wide 50% tall, covers bottom by default
-      gui.line(TileX+     0x1F        , TileY+flip(0x1F, VFlip), TileX+     0x00        , TileY+flip(0x1F, VFlip), slope_color);
-      gui.line(TileX+flip(0x00, HFlip), TileY+flip(0x1F, VFlip), TileX+flip(0x00, HFlip), TileY+flip(0x10, VFlip), slope_color);
-      gui.line(TileX+     0x00        , TileY+flip(0x10, VFlip), TileX+     0x1F        , TileY+flip(0x10, VFlip), slope_color);
-      gui.line(TileX+flip(0x1F, HFlip), TileY+flip(0x10, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x1F, VFlip), slope_color);
-    end,
-    [0x01] = function () -- 1/2 tile rectangle, 50% wide 100% tall, covers right by default
-      gui.line(TileX+flip(0x1F, HFlip), TileY+flip(0x1F, VFlip), TileX+flip(0x10, HFlip), TileY+flip(0x1F, VFlip), slope_color);
-      gui.line(TileX+flip(0x10, HFlip), TileY+     0x1F        , TileX+flip(0x10, HFlip), TileY+     0x00        , slope_color);
-      gui.line(TileX+flip(0x10, HFlip), TileY+flip(0x00, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x00, VFlip), slope_color);
-      gui.line(TileX+flip(0x1F, HFlip), TileY+     0x00        , TileX+flip(0x1F, HFlip), TileY+     0x1F        , slope_color);
-    end,
-    [0x02] = function () -- 1/4 tile square, 50% wide 50% tall, covers bottom right by default
-      gui.line(TileX+flip(0x1F, HFlip), TileY+flip(0x1F, VFlip), TileX+flip(0x10, HFlip), TileY+flip(0x1F, VFlip), slope_color);
-      gui.line(TileX+flip(0x10, HFlip), TileY+flip(0x1F, VFlip), TileX+flip(0x10, HFlip), TileY+flip(0x10, VFlip), slope_color);
-      gui.line(TileX+flip(0x10, HFlip), TileY+flip(0x10, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x10, VFlip), slope_color);
-      gui.line(TileX+flip(0x1F, HFlip), TileY+flip(0x10, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x1F, VFlip), slope_color);
-    end,
-    [0x03] = function () -- 3/4 tile anti-square, covers bottom right by default
-      gui.line(TileX+     0x1F        , TileY+flip(0x1F, VFlip), TileX+     0x00        , TileY+flip(0x1F, VFlip), slope_color);
-      gui.line(TileX+flip(0x00, HFlip), TileY+flip(0x1F, VFlip), TileX+flip(0x00, HFlip), TileY+flip(0x10, VFlip), slope_color);
-      gui.line(TileX+flip(0x00, HFlip), TileY+flip(0x10, VFlip), TileX+flip(0x10, HFlip), TileY+flip(0x10, VFlip), slope_color);
-      gui.line(TileX+flip(0x10, HFlip), TileY+flip(0x10, VFlip), TileX+flip(0x10, HFlip), TileY+flip(0x00, VFlip), slope_color);
-      gui.line(TileX+flip(0x10, HFlip), TileY+flip(0x00, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x00, VFlip), slope_color);
-      gui.line(TileX+flip(0x1F, HFlip), TileY+     0x00        , TileX+flip(0x1F, HFlip), TileY+     0x1F        , slope_color);
-    end,
-    [0x04] = function () -- unused?
-      draw_tile_boundaries(TileX, TileY, slope_color);
-    end,
-    [0x05] = function () -- 1/4 tile triangle, 100% wide 50% tall, covers bottom by default, horizontally symmetric
-      gui.line(TileX+     0x1F        , TileY+flip(0x1F, VFlip), TileX+     0x00        , TileY+flip(0x1F, VFlip), slope_color);
-      gui.line(TileX+     0x00        , TileY+flip(0x1F, VFlip), TileX+     0x0F        , TileY+flip(0x10, VFlip), slope_color); -- this line becomes the 3rd line when HFlip is 1
-      gui.line(TileX+     0x10        , TileY+flip(0x10, VFlip), TileX+     0x1F        , TileY+flip(0x1F, VFlip), slope_color); -- this line becomes the 2nd line when HFlip is 1
-    end,
-    [0x06] = function () -- 1/2 tile triangle, covers bottom by default, 100% wide 50% tall, covers bottom by default, horizontally symmetric
-      gui.line(TileX+     0x1F        , TileY+flip(0x1F, VFlip), TileX+     0x00        , TileY+flip(0x1F, VFlip), slope_color);
-      gui.line(TileX+     0x00        , TileY+flip(0x1F, VFlip), TileX+     0x0F        , TileY+flip(0x00, VFlip), slope_color); -- this line becomes the 3rd line when HFlip is 1
-      gui.line(TileX+     0x10        , TileY+flip(0x00, VFlip), TileX+     0x1F        , TileY+flip(0x1F, VFlip), slope_color); -- this line becomes the 2nd line when HFlip is 1
-    end,
-    [0x07] = function () -- 1/2 tile unmagnet, pushes up by default
-      gui.line(TileX+     0x1F        , TileY+flip(0x1F, VFlip), TileX+     0x00        , TileY+flip(0x1F, VFlip), slope_color);
-      gui.line(TileX+flip(0x00, HFlip), TileY+flip(0x1F, VFlip), TileX+flip(0x00, HFlip), TileY+flip(0x10, VFlip), slope_color);
-      gui.line(TileX+     0x00        , TileY+flip(0x10, VFlip), TileX+     0x1F        , TileY+flip(0x10, VFlip), slope_color);
-      gui.line(TileX+flip(0x1F, HFlip), TileY+flip(0x10, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x1F, VFlip), slope_color);
-    
-      gui.line(TileX+     0x00        , TileY+flip(0x14, VFlip), TileX+     0x1F        , TileY+flip(0x14, VFlip), slope_color);
-    end,
-    [0x08] = function () -- is this used?
-      default_slope(TileX, TileY, VFlip);
-    end,    
-    [0x09] = function () -- is this used?
-      default_slope(TileX, TileY, VFlip);
-    end,    
-    [0x0A] = function () -- is this used?
-      default_slope(TileX, TileY, VFlip);
-    end,    
-    [0x0B] = function () -- is this used?
-      default_slope(TileX, TileY, VFlip);
-    end,    
-    [0x0C] = function () -- is this used?
-      default_slope(TileX, TileY, VFlip);
-    end,    
-    [0x0D] = function () -- is this used?
-      default_slope(TileX, TileY, VFlip);
-    end,    
-    [0x0E] = function () -- four step bars, solid for (4+3+2+1)/(4+4+4+4), covers bottom right by default
-      gui.line(TileX+     0x1F        , TileY+flip(0x1F, VFlip), TileX+     0x00        , TileY+flip(0x1F, VFlip), slope_color);
-      gui.line(TileX+     0x00        , TileY+flip(0x1F, VFlip), TileX+     0x00        , TileY+flip(0x18, VFlip), slope_color); -- this line becomes the 4th line when HFlip is 1
-      gui.line(TileX+     0x00        , TileY+flip(0x18, VFlip), TileX+     0x1F        , TileY+flip(0x18, VFlip), slope_color);
-      gui.line(TileX+     0x1F        , TileY+flip(0x18, VFlip), TileX+     0x1F        , TileY+flip(0x1F, VFlip), slope_color); -- this line becomes the 2nd line when HFlip is 1
-    
-      gui.line(TileX+flip(0x1F, HFlip), TileY+flip(0x17, VFlip), TileX+flip(0x08, HFlip), TileY+flip(0x17, VFlip), slope_color);
-      gui.line(TileX+flip(0x08, HFlip), TileY+flip(0x17, VFlip), TileX+flip(0x08, HFlip), TileY+flip(0x10, VFlip), slope_color);
-      gui.line(TileX+flip(0x08, HFlip), TileY+flip(0x10, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x10, VFlip), slope_color);
-      gui.line(TileX+flip(0x1F, HFlip), TileY+flip(0x10, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x17, VFlip), slope_color);
+  [0x00] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- 1/2 tile rectangle, 100% wide 50% tall, covers bottom by default
+    gui.line(cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x10, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x10, vFlip), cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x10, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x10, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+  end,
+  [0x01] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- 1/2 tile rectangle, 50% wide 100% tall, covers right by default
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+flip(0x10, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x10, hFlip), cameraTileOffsetY+     0x1F        , cameraTileOffsetX+flip(0x10, hFlip), cameraTileOffsetY+     0x00        , blockColor);
+    gui.line(cameraTileOffsetX+flip(0x10, hFlip), cameraTileOffsetY+flip(0x00, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x00, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x00        , cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x1F        , blockColor);
+  end,
+  [0x02] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- 1/4 tile square, 50% wide 50% tall, covers bottom right by default
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+flip(0x10, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x10, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+flip(0x10, hFlip), cameraTileOffsetY+flip(0x10, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x10, hFlip), cameraTileOffsetY+flip(0x10, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x10, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x10, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+  end,
+  [0x03] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- 3/4 tile anti-square, covers bottom right by default
+    gui.line(cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x10, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x10, vFlip), cameraTileOffsetX+flip(0x10, hFlip), cameraTileOffsetY+flip(0x10, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x10, hFlip), cameraTileOffsetY+flip(0x10, vFlip), cameraTileOffsetX+flip(0x10, hFlip), cameraTileOffsetY+flip(0x00, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x10, hFlip), cameraTileOffsetY+flip(0x00, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x00, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x00        , cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x1F        , blockColor);
+  end,
+  [0x04] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- unused?
+    draw_tile_boundaries(cameraTileOffsetX, cameraTileOffsetY, blockColor);
+  end,
+  [0x05] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- 1/4 tile triangle, 100% wide 50% tall, covers bottom by default, horizontally symmetric
+    gui.line(cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+     0x0F        , cameraTileOffsetY+flip(0x10, vFlip), blockColor); -- this line becomes the 3rd line when hFlip is 1
+    gui.line(cameraTileOffsetX+     0x10        , cameraTileOffsetY+flip(0x10, vFlip), cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x1F, vFlip), blockColor); -- this line becomes the 2nd line when hFlip is 1
+  end,
+  [0x06] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- 1/2 tile triangle, covers bottom by default, 100% wide 50% tall, covers bottom by default, horizontally symmetric
+    gui.line(cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+     0x0F        , cameraTileOffsetY+flip(0x00, vFlip), blockColor); -- this line becomes the 3rd line when hFlip is 1
+    gui.line(cameraTileOffsetX+     0x10        , cameraTileOffsetY+flip(0x00, vFlip), cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x1F, vFlip), blockColor); -- this line becomes the 2nd line when hFlip is 1
+  end,
+  [0x07] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- 1/2 tile unmagnet, pushes up by default
+    gui.line(cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x10, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x10, vFlip), cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x10, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x10, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
 
-      gui.line(TileX+flip(0x1F, HFlip), TileY+flip(0x0F, VFlip), TileX+flip(0x10, HFlip), TileY+flip(0x0F, VFlip), slope_color);
-      gui.line(TileX+flip(0x10, HFlip), TileY+flip(0x0F, VFlip), TileX+flip(0x10, HFlip), TileY+flip(0x08, VFlip), slope_color);
-      gui.line(TileX+flip(0x10, HFlip), TileY+flip(0x08, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x08, VFlip), slope_color);
-      gui.line(TileX+flip(0x1F, HFlip), TileY+flip(0x08, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x0F, VFlip), slope_color);
+    gui.line(cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x14, vFlip), cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x14, vFlip), blockColor);
+  end,
+  [0x08] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- is this used?
+    default_slope(cameraTileOffsetX, cameraTileOffsetY, vFlip);
+  end,
+  [0x09] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- is this used?
+    default_slope(cameraTileOffsetX, cameraTileOffsetY, vFlip);
+  end,
+  [0x0A] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- is this used?
+    default_slope(cameraTileOffsetX, cameraTileOffsetY, vFlip);
+  end,
+  [0x0B] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- is this used?
+    default_slope(cameraTileOffsetX, cameraTileOffsetY, vFlip);
+  end,
+  [0x0C] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- is this used?
+    default_slope(cameraTileOffsetX, cameraTileOffsetY, vFlip);
+  end,
+  [0x0D] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- is this used?
+    default_slope(cameraTileOffsetX, cameraTileOffsetY, vFlip);
+  end,
+  [0x0E] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- four step bars, solid for (4+3+2+1)/(4+4+4+4), covers bottom right by default
+    gui.line(cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x18, vFlip), blockColor); -- this line becomes the 4th line when hFlip is 1
+    gui.line(cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x18, vFlip), cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x18, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x18, vFlip), cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x1F, vFlip), blockColor); -- this line becomes the 2nd line when hFlip is 1
 
-      gui.line(TileX+flip(0x1F, HFlip), TileY+flip(0x07, VFlip), TileX+flip(0x18, HFlip), TileY+flip(0x07, VFlip), slope_color);
-      gui.line(TileX+flip(0x18, HFlip), TileY+flip(0x07, VFlip), TileX+flip(0x18, HFlip), TileY+flip(0x00, VFlip), slope_color);
-      gui.line(TileX+flip(0x18, HFlip), TileY+flip(0x00, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x00, VFlip), slope_color);
-      gui.line(TileX+flip(0x1F, HFlip), TileY+flip(0x00, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x07, VFlip), slope_color);
-    end,
-    [0x0F] = function () -- tourian escape room 3 stairs
-      gui.line(TileX+     0x1F        , TileY+flip(0x1F, VFlip), TileX+     0x00        , TileY+flip(0x1F, VFlip), slope_color);
-      gui.line(TileX+flip(0x00, HFlip), TileY+flip(0x1F, VFlip), TileX+flip(0x0F, HFlip), TileY+flip(0x18, VFlip), slope_color);
-      gui.line(TileX+flip(0x10, HFlip), TileY+flip(0x17, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x00, VFlip), slope_color);
-      gui.line(TileX+flip(0x1F, HFlip), TileY+     0x00        , TileX+flip(0x1F, HFlip), TileY+     0x1F        , slope_color);
-    end,
-    [0x10] = function () -- four horizontal lines, evenly spaced, unused?
-      gui.line(TileX+     0x1F        , TileY+flip(0x1F, VFlip), TileX+     0x00        , TileY+flip(0x1F, VFlip), slope_color);
-      gui.line(TileX+     0x1F        , TileY+flip(0x17, VFlip), TileX+     0x00        , TileY+flip(0x17, VFlip), slope_color);
-      gui.line(TileX+     0x1F        , TileY+flip(0x0F, VFlip), TileX+     0x00        , TileY+flip(0x0F, VFlip), slope_color);
-      gui.line(TileX+     0x1F        , TileY+flip(0x07, VFlip), TileX+     0x00        , TileY+flip(0x07, VFlip), slope_color);
-    end,
-    [0x11] = function () -- four vertical lines, evenly spaced, unused?
-      gui.line(TileX+flip(0x1F, HFlip), TileY+     0x00        , TileX+flip(0x1F, HFlip), TileY+     0x1F        , slope_color);
-      gui.line(TileX+flip(0x17, HFlip), TileY+     0x00        , TileX+flip(0x17, HFlip), TileY+     0x1F        , slope_color);
-      gui.line(TileX+flip(0x0F, HFlip), TileY+     0x00        , TileX+flip(0x0F, HFlip), TileY+     0x1F        , slope_color);
-      gui.line(TileX+flip(0x07, HFlip), TileY+     0x00        , TileX+flip(0x07, HFlip), TileY+     0x1F        , slope_color);
-    end,
-    [0x12] = function () -- 1x1 diagonal, 1/2 solid, covers bottom right by default
-      gui.line(TileX+     0x1F        , TileY+flip(0x1F, VFlip), TileX+     0x00        , TileY+flip(0x1F, VFlip), slope_color);
-      gui.line(TileX+flip(0x00, HFlip), TileY+flip(0x1F, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x00, VFlip), slope_color);
-      gui.line(TileX+flip(0x1F, HFlip), TileY+     0x00        , TileX+flip(0x1F, HFlip), TileY+     0x1F        , slope_color);
-    end,
-    [0x13] = function () -- full tile unmagnet, pushes up by default
-      default_slope(TileX, TileY, VFlip);
-    end,
-    [0x14] = function () -- 1x1 diagonal, 1/4 solid, covers bottom right by default
-      gui.line(TileX+flip(0x1F, HFlip), TileY+flip(0x1F, VFlip), TileX+flip(0x10, HFlip), TileY+flip(0x1F, VFlip), slope_color);
-      gui.line(TileX+flip(0x10, HFlip), TileY+flip(0x1F, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x10, VFlip), slope_color);
-      gui.line(TileX+flip(0x1F, HFlip), TileY+flip(0x10, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x1F, VFlip), slope_color);
-    end,
-    [0x15] = function () -- 1x1 diagonal, 3/4 solid, covers bottom right by default
-      gui.line(TileX+     0x1F        , TileY+flip(0x1F, VFlip), TileX+     0x00        , TileY+flip(0x1F, VFlip), slope_color);
-      gui.line(TileX+flip(0x00, HFlip), TileY+flip(0x1F, VFlip), TileX+flip(0x00, HFlip), TileY+flip(0x10, VFlip), slope_color);
-      gui.line(TileX+flip(0x00, HFlip), TileY+flip(0x0F, VFlip), TileX+flip(0x0F, HFlip), TileY+flip(0x00, VFlip), slope_color);
-      gui.line(TileX+flip(0x10, HFlip), TileY+flip(0x00, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x00, VFlip), slope_color);
-      gui.line(TileX+flip(0x1F, HFlip), TileY+     0x00        , TileX+flip(0x1F, HFlip), TileY+     0x1F        , slope_color);
-    end,
-    [0x16] = function () -- 2x1 diagonal, wider than it is tall, 1/4 solid, covers bottom right by default
-      gui.line(TileX+     0x1F        , TileY+flip(0x1F, VFlip), TileX+     0x00        , TileY+flip(0x1F, VFlip), slope_color);
-      gui.line(TileX+flip(0x00, HFlip), TileY+flip(0x1F, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x10, VFlip), slope_color);
-      gui.line(TileX+flip(0x1F, HFlip), TileY+flip(0x10, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x1F, VFlip), slope_color);
-    end,
-    [0x17] = function () -- 2x1 diagonal, wider than it is tall, 3/4 solid, covers bottom right by default
-      gui.line(TileX+     0x1F        , TileY+flip(0x1F, VFlip), TileX+     0x00        , TileY+flip(0x1F, VFlip), slope_color);
-      gui.line(TileX+flip(0x00, HFlip), TileY+flip(0x1F, VFlip), TileX+flip(0x00, HFlip), TileY+flip(0x10, VFlip), slope_color);
-      gui.line(TileX+flip(0x00, HFlip), TileY+flip(0x0F, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x00, VFlip), slope_color);
-      gui.line(TileX+flip(0x1F, HFlip), TileY+     0x00        , TileX+flip(0x1F, HFlip), TileY+     0x1F        , slope_color);
-    end,
-    [0x18] = function () -- 3x1 diagonal, wider than it is tall, 1/6 solid, covers bottom right by default
-      gui.line(TileX+     0x1F        , TileY+flip(0x1F, VFlip), TileX+     0x00        , TileY+flip(0x1F, VFlip), slope_color);
-      gui.line(TileX+flip(0x00, HFlip), TileY+flip(0x1F, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x15, VFlip), slope_color);
-      gui.line(TileX+flip(0x1F, HFlip), TileY+flip(0x15, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x1F, VFlip), slope_color);
-    end,
-    [0x19] = function () -- 3x1 diagonal, wider than it is tall, 3/6 solid, covers bottom right by default
-      gui.line(TileX+     0x1F        , TileY+flip(0x1F, VFlip), TileX+     0x00        , TileY+flip(0x1F, VFlip), slope_color);
-      gui.line(TileX+flip(0x00, HFlip), TileY+flip(0x1F, VFlip), TileX+flip(0x00, HFlip), TileY+flip(0x15, VFlip), slope_color);
-      gui.line(TileX+flip(0x00, HFlip), TileY+flip(0x15, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x0A, VFlip), slope_color);
-      gui.line(TileX+flip(0x1F, HFlip), TileY+flip(0x0A, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x1F, VFlip), slope_color);
-    end,
-    [0x1A] = function () -- 3x1 diagonal, wider than it is tall, 5/6 solid, covers bottom right by default
-      gui.line(TileX+     0x1F        , TileY+flip(0x1F, VFlip), TileX+     0x00        , TileY+flip(0x1F, VFlip), slope_color);
-      gui.line(TileX+flip(0x00, HFlip), TileY+flip(0x1F, VFlip), TileX+flip(0x00, HFlip), TileY+flip(0x0A, VFlip), slope_color);
-      gui.line(TileX+flip(0x00, HFlip), TileY+flip(0x0A, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x00, VFlip), slope_color);
-      gui.line(TileX+flip(0x1F, HFlip), TileY+     0x00        , TileX+flip(0x1F, HFlip), TileY+     0x1F        , slope_color);
-    end,
-    [0x1B] = function () -- 1x2 diagonal, taller than it is wide, 1/4 solid, covers bottom right by default
-      gui.line(TileX+flip(0x1F, HFlip), TileY+flip(0x1F, VFlip), TileX+flip(0x10, HFlip), TileY+flip(0x1F, VFlip), slope_color);
-      gui.line(TileX+flip(0x10, HFlip), TileY+flip(0x1F, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x00, VFlip), slope_color);
-      gui.line(TileX+flip(0x1F, HFlip), TileY+     0x00        , TileX+flip(0x1F, HFlip), TileY+     0x1F        , slope_color);
-    end,
-    [0x1C] = function () -- 1x2 diagonal, taller than it is wide, 3/4 solid, covers bottom right by default
-      gui.line(TileX+     0x1F        , TileY+flip(0x1F, VFlip), TileX+     0x00        , TileY+flip(0x1F, VFlip), slope_color);
-      gui.line(TileX+flip(0x00, HFlip), TileY+flip(0x1F, VFlip), TileX+flip(0x0F, HFlip), TileY+flip(0x00, VFlip), slope_color);
-      gui.line(TileX+flip(0x10, HFlip), TileY+flip(0x00, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x00, VFlip), slope_color);
-      gui.line(TileX+flip(0x1F, HFlip), TileY+     0x00        , TileX+flip(0x1F, HFlip), TileY+     0x1F        , slope_color);
-    end,
-    [0x1D] = function () -- 1x3 diagonal, taller than it is wide, 1/6 solid, covers bottom right by default
-      gui.line(TileX+flip(0x1F, HFlip), TileY+flip(0x1F, VFlip), TileX+flip(0x15, HFlip), TileY+flip(0x1F, VFlip), slope_color);
-      gui.line(TileX+flip(0x15, HFlip), TileY+flip(0x1F, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x00, VFlip), slope_color);
-      gui.line(TileX+flip(0x1F, HFlip), TileY+     0x00        , TileX+flip(0x1F, HFlip), TileY+     0x1F        , slope_color);
-    end,
-    [0x1E] = function () -- 1x3 diagonal, taller than it is wide, 3/6 solid, covers bottom right by default
-      gui.line(TileX+flip(0x1F, HFlip), TileY+flip(0x1F, VFlip), TileX+flip(0x0A, HFlip), TileY+flip(0x1F, VFlip), slope_color);
-      gui.line(TileX+flip(0x0A, HFlip), TileY+flip(0x1F, VFlip), TileX+flip(0x15, HFlip), TileY+flip(0x00, VFlip), slope_color);
-      gui.line(TileX+flip(0x15, HFlip), TileY+flip(0x00, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x00, VFlip), slope_color);
-      gui.line(TileX+flip(0x1F, HFlip), TileY+     0x00        , TileX+flip(0x1F, HFlip), TileY+     0x1F        , slope_color);
-    end,
-    [0x1F] = function () -- 1x3 diagonal, taller than it is wide, 5/6 solid, covers bottom right by default
-      gui.line(TileX+     0x1F        , TileY+flip(0x1F, VFlip), TileX+     0x00        , TileY+flip(0x1F, VFlip), slope_color);
-      gui.line(TileX+flip(0x00, HFlip), TileY+flip(0x1F, VFlip), TileX+flip(0x0A, HFlip), TileY+flip(0x00, VFlip), slope_color);
-      gui.line(TileX+flip(0x0A, HFlip), TileY+flip(0x00, VFlip), TileX+flip(0x1F, HFlip), TileY+flip(0x00, VFlip), slope_color);
-      gui.line(TileX+flip(0x1F, HFlip), TileY+     0x00        , TileX+flip(0x1F, HFlip), TileY+     0x1F        , slope_color);
-    end
-}
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x17, vFlip), cameraTileOffsetX+flip(0x08, hFlip), cameraTileOffsetY+flip(0x17, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x08, hFlip), cameraTileOffsetY+flip(0x17, vFlip), cameraTileOffsetX+flip(0x08, hFlip), cameraTileOffsetY+flip(0x10, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x08, hFlip), cameraTileOffsetY+flip(0x10, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x10, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x10, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x17, vFlip), blockColor);
 
--- doors = {[0x88FE]=true, [0x890A]=true, [0x8916]=true, [0x8922]=true, [0x892E]=true, [0x893A]=true, [0x8946]=true, [0x8952]=true, [0x895E]=true, [0x896A]=true, [0x8976]=true, [0x8982]=true, [0x898E]=true, [0x899A]=true, [0x89A6]=true, [0x89B2]=true, [0x89BE]=true, [0x89CA]=true, [0x89D6]=true, [0x89E2]=true, [0x89EE]=true, [0x89FA]=true, [0x8A06]=true, [0x8A12]=true, [0x8A1E]=true, [0x8A2A]=true, [0x8A36]=true, [0x8A42]=true, [0x8A4E]=true, [0x8A5A]=true, [0x8A66]=true, [0x8A72]=true, [0x8A7E]=true, [0x8A8A]=true, [0x8A96]=true, [0x8AA2]=true, [0x8AAE]=true, [0x8ABA]=true, [0x8AC6]=true, [0x8AD2]=true, [0x8ADE]=true, [0x8AEA]=true, [0x8AF6]=true, [0x8B02]=true, [0x8B0E]=true, [0x8B1A]=true, [0x8B26]=true, [0x8B32]=true, [0x8B3E]=true, [0x8B4A]=true, [0x8B56]=true, [0x8B62]=true, [0x8B6E]=true, [0x8B7A]=true, [0x8B86]=true, [0x8B92]=true, [0x8B9E]=true, [0x8BAA]=true, [0x8BB6]=true, [0x8BC2]=true, [0x8BCE]=true, [0x8BDA]=true, [0x8BE6]=true, [0x8BF2]=true, [0x8BFE]=true, [0x8C0A]=true, [0x8C16]=true, [0x8C22]=true, [0x8C2E]=true, [0x8C3A]=true, [0x8C46]=true, [0x8C52]=true, [0x8C5E]=true, [0x8C6A]=true, [0x8C76]=true, [0x8C82]=true, [0x8C8E]=true, [0x8C9A]=true, [0x8CA6]=true, [0x8CB2]=true, [0x8CBE]=true, [0x8CCA]=true, [0x8CD6]=true, [0x8CE2]=true, [0x8CEE]=true, [0x8CFA]=true, [0x8D06]=true, [0x8D12]=true, [0x8D1E]=true, [0x8D2A]=true, [0x8D36]=true, [0x8D42]=true, [0x8D4E]=true, [0x8D5A]=true, [0x8D66]=true, [0x8D72]=true, [0x8D7E]=true, [0x8D8A]=true, [0x8D96]=true, [0x8DA2]=true, [0x8DAE]=true, [0x8DBA]=true, [0x8DC6]=true, [0x8DD2]=true, [0x8DDE]=true, [0x8DEA]=true, [0x8DF6]=true, [0x8E02]=true, [0x8E0E]=true, [0x8E1A]=true, [0x8E26]=true, [0x8E32]=true, [0x8E3E]=true, [0x8E4A]=true, [0x8E56]=true, [0x8E62]=true, [0x8E6E]=true, [0x8E7A]=true, [0x8E86]=true, [0x8E92]=true, [0x8E9E]=true, [0x8EAA]=true, [0x8EB6]=true, [0x8EC2]=true, [0x8ECE]=true, [0x8EDA]=true, [0x8EE6]=true, [0x8EF2]=true, [0x8EFE]=true, [0x8F0A]=true, [0x8F16]=true, [0x8F22]=true, [0x8F2E]=true, [0x8F3A]=true, [0x8F46]=true, [0x8F52]=true, [0x8F5E]=true, [0x8F6A]=true, [0x8F76]=true, [0x8F82]=true, [0x8F8E]=true, [0x8F9A]=true, [0x8FA6]=true, [0x8FB2]=true, [0x8FBE]=true, [0x8FCA]=true, [0x8FD6]=true, [0x8FE2]=true, [0x8FEE]=true, [0x8FFA]=true, [0x9006]=true, [0x9012]=true, [0x901E]=true, [0x902A]=true, [0x9036]=true, [0x9042]=true, [0x904E]=true, [0x905A]=true, [0x9066]=true, [0x9072]=true, [0x907E]=true, [0x908A]=true, [0x9096]=true, [0x90A2]=true, [0x90AE]=true, [0x90BA]=true, [0x90C6]=true, [0x90D2]=true, [0x90DE]=true, [0x90EA]=true, [0x90F6]=true, [0x9102]=true, [0x910E]=true, [0x911A]=true, [0x9126]=true, [0x9132]=true, [0x913E]=true, [0x914A]=true, [0x9156]=true, [0x9162]=true, [0x916E]=true, [0x917A]=true, [0x9186]=true, [0x9192]=true, [0x919E]=true, [0x91AA]=true, [0x91B6]=true, [0x91C2]=true, [0x91CE]=true, [0x91DA]=true, [0x91E6]=true, [0x91F2]=true, [0x91FE]=true, [0x920A]=true, [0x9216]=true, [0x9222]=true, [0x922E]=true, [0x923A]=true, [0x9246]=true, [0x9252]=true, [0x925E]=true, [0x926A]=true, [0x9276]=true, [0x9282]=true, [0x928E]=true, [0x929A]=true, [0x92A6]=true, [0x92B2]=true, [0x92BE]=true, [0x92CA]=true, [0x92D6]=true, [0x92E2]=true, [0x92EE]=true, [0x92FA]=true, [0x9306]=true, [0x9312]=true, [0x931E]=true, [0x932A]=true, [0x9336]=true, [0x9342]=true, [0x934E]=true, [0x935A]=true, [0x9366]=true, [0x9372]=true, [0x937E]=true, [0x938A]=true, [0x9396]=true, [0x93A2]=true, [0x93AE]=true, [0x93BA]=true, [0x93C6]=true, [0x93D2]=true, [0x93DE]=true, [0x93EA]=true, [0x93F6]=true, [0x9402]=true, [0x940E]=true, [0x941A]=true, [0x9426]=true, [0x9432]=true, [0x943E]=true, [0x944A]=true, [0x9456]=true, [0x9462]=true, [0x946E]=true, [0x947A]=true, [0x9486]=true, [0x9492]=true, [0x949E]=true, [0x94AA]=true, [0x94B6]=true, [0x94C2]=true, [0x94CE]=true, [0x94DA]=true, [0x94E6]=true, [0x94F2]=true, [0x94FE]=true, [0x950A]=true, [0x9516]=true, [0x9522]=true, [0x952E]=true, [0x953A]=true, [0x9546]=true, [0x9552]=true, [0x955E]=true, [0x956A]=true, [0x9576]=true, [0x9582]=true, [0x958E]=true, [0x959A]=true, [0x95A6]=true, [0x95B2]=true, [0x95BE]=true, [0x95CA]=true, [0x95D6]=true, [0x95E2]=true, [0x95EE]=true, [0x95FA]=true, [0x9606]=true, [0x9612]=true, [0x961E]=true, [0x962A]=true, [0x9636]=true, [0x9642]=true, [0x964E]=true, [0x965A]=true, [0x9666]=true, [0x9672]=true, [0x967E]=true, [0x968A]=true, [0x9696]=true, [0x96A2]=true, [0x96AE]=true, [0x96BA]=true, [0x96C6]=true, [0x96D2]=true, [0x96DE]=true, [0x96EA]=true, [0x96F6]=true, [0x9702]=true, [0x970E]=true, [0x971A]=true, [0x9726]=true, [0x9732]=true, [0x973E]=true, [0x974A]=true, [0x9756]=true, [0x9762]=true, [0x976E]=true, [0x977A]=true, [0x9786]=true, [0x9792]=true, [0x979E]=true, [0x97AA]=true, [0x97B6]=true, [0x97C2]=true, [0x97CE]=true, [0x97DA]=true, [0x97E6]=true, [0x97F2]=true, [0x97FE]=true, [0x980A]=true, [0x9816]=true, [0x9822]=true, [0x982E]=true, [0x983A]=true, [0x9846]=true, [0x9852]=true, [0x985E]=true, [0x986A]=true, [0x9876]=true, [0x9882]=true, [0x988E]=true, [0x989A]=true, [0x98A6]=true, [0x98B2]=true, [0x98BE]=true, [0x98CA]=true, [0x98D6]=true, [0x98E2]=true, [0x98EE]=true, [0x98FA]=true, [0x9906]=true, [0x9912]=true, [0x991E]=true, [0x992A]=true, [0x9936]=true, [0x9942]=true, [0x994E]=true, [0x995A]=true, [0x9966]=true, [0x9972]=true, [0x997E]=true, [0x998A]=true, [0x9996]=true, [0x99A2]=true, [0x99AE]=true, [0x99BA]=true, [0x99C6]=true, [0x99D2]=true, [0x99DE]=true, [0x99EA]=true, [0x99F6]=true, [0x9A02]=true, [0x9A0E]=true, [0x9A1A]=true, [0x9A26]=true, [0x9A32]=true, [0x9A3E]=true, [0x9A4A]=true, [0x9A56]=true, [0x9A62]=true, [0x9A6E]=true, [0x9A7A]=true, [0x9A86]=true, [0x9A92]=true, [0x9A9E]=true, [0x9AAA]=true, [0x9AB6]=true, [0xA18C]=true, [0xA198]=true, [0xA1A4]=true, [0xA1B0]=true, [0xA1BC]=true, [0xA1C8]=true, [0xA1D4]=true, [0xA1E0]=true, [0xA1EC]=true, [0xA1F8]=true, [0xA204]=true, [0xA210]=true, [0xA21C]=true, [0xA228]=true, [0xA234]=true, [0xA240]=true, [0xA24C]=true, [0xA258]=true, [0xA264]=true, [0xA270]=true, [0xA27C]=true, [0xA288]=true, [0xA294]=true, [0xA2A0]=true, [0xA2AC]=true, [0xA2B8]=true, [0xA2C4]=true, [0xA2D0]=true, [0xA2DC]=true, [0xA2E8]=true, [0xA2F4]=true, [0xA300]=true, [0xA30C]=true, [0xA318]=true, [0xA324]=true, [0xA330]=true, [0xA33C]=true, [0xA348]=true, [0xA354]=true, [0xA360]=true, [0xA36C]=true, [0xA378]=true, [0xA384]=true, [0xA390]=true, [0xA39C]=true, [0xA3A8]=true, [0xA3B4]=true, [0xA3C0]=true, [0xA3CC]=true, [0xA3D8]=true, [0xA3E4]=true, [0xA3F0]=true, [0xA3FC]=true, [0xA408]=true, [0xA414]=true, [0xA420]=true, [0xA42C]=true, [0xA438]=true, [0xA444]=true, [0xA450]=true, [0xA45C]=true, [0xA468]=true, [0xA474]=true, [0xA480]=true, [0xA48C]=true, [0xA498]=true, [0xA4A4]=true, [0xA4B0]=true, [0xA4BC]=true, [0xA4C8]=true, [0xA4D4]=true, [0xA4E0]=true, [0xA4EC]=true, [0xA4F8]=true, [0xA504]=true, [0xA510]=true, [0xA51C]=true, [0xA528]=true, [0xA534]=true, [0xA540]=true, [0xA54C]=true, [0xA558]=true, [0xA564]=true, [0xA570]=true, [0xA57C]=true, [0xA588]=true, [0xA594]=true, [0xA5A0]=true, [0xA5AC]=true, [0xA5B8]=true, [0xA5C4]=true, [0xA5D0]=true, [0xA5DC]=true, [0xA5E8]=true, [0xA5F4]=true, [0xA600]=true, [0xA60C]=true, [0xA618]=true, [0xA624]=true, [0xA630]=true, [0xA63C]=true, [0xA648]=true, [0xA654]=true, [0xA660]=true, [0xA66C]=true, [0xA678]=true, [0xA684]=true, [0xA690]=true, [0xA69C]=true, [0xA6A8]=true, [0xA6B4]=true, [0xA6C0]=true, [0xA6CC]=true, [0xA6D8]=true, [0xA6E4]=true, [0xA6F0]=true, [0xA6FC]=true, [0xA708]=true, [0xA714]=true, [0xA720]=true, [0xA72C]=true, [0xA738]=true, [0xA744]=true, [0xA750]=true, [0xA75C]=true, [0xA768]=true, [0xA774]=true, [0xA780]=true, [0xA78C]=true, [0xA798]=true, [0xA7A4]=true, [0xA7B0]=true, [0xA7BC]=true, [0xA7C8]=true, [0xA7D4]=true, [0xA7E0]=true, [0xA7EC]=true, [0xA7F8]=true, [0xA810]=true, [0xA828]=true, [0xA834]=true, [0xA840]=true, [0xA84C]=true, [0xA858]=true, [0xA864]=true, [0xA870]=true, [0xA87C]=true, [0xA888]=true, [0xA894]=true, [0xA8A0]=true, [0xA8AC]=true, [0xA8B8]=true, [0xA8C4]=true, [0xA8D0]=true, [0xA8DC]=true, [0xA8E8]=true, [0xA8F4]=true, [0xA900]=true, [0xA90C]=true, [0xA918]=true, [0xA924]=true, [0xA930]=true, [0xA93C]=true, [0xA948]=true, [0xA954]=true, [0xA960]=true, [0xA96C]=true, [0xA978]=true, [0xA984]=true, [0xA990]=true, [0xA99C]=true, [0xA9A8]=true, [0xA9B4]=true, [0xA9C0]=true, [0xA9CC]=true, [0xA9D8]=true, [0xA9E4]=true, [0xA9F0]=true, [0xA9FC]=true, [0xAA08]=true, [0xAA14]=true, [0xAA20]=true, [0xAA2C]=true, [0xAA38]=true, [0xAA44]=true, [0xAA50]=true, [0xAA5C]=true, [0xAA68]=true, [0xAA74]=true, [0xAA80]=true, [0xAA8C]=true, [0xAA98]=true, [0xAAA4]=true, [0xAAB0]=true, [0xAABC]=true, [0xAAC8]=true, [0xAAD4]=true, [0xAAE0]=true, [0xAAEC]=true, [0xAAF8]=true, [0xAB04]=true, [0xAB10]=true, [0xAB1C]=true, [0xAB28]=true, [0xAB34]=true, [0xAB40]=true, [0xAB4C]=true, [0xAB58]=true, [0xAB64]=true, [0xAB70]=true, [0xAB7C]=true, [0xAB88]=true, [0xAB94]=true, [0xABA0]=true, [0xABAC]=true, [0xABB8]=true, [0xABC4]=true, [0xABCF]=true, [0xABDA]=true, [0xABE5]=true}
-outline = {
-    [0x00] = function () -- Air
-    end,
-    [0x01] = function () -- Slope
-      local b = memory.readbyte('BUS', BTS);
-      if bit.band(b, 0x40) ~= 0 then
-        HFlip = 1;
-      else
-        HFlip = 0;
-      end;
-        
-      if bit.band(b, 0x80) ~= 0 then
-        VFlip = 1;
-      else
-        VFlip = 0;
-      end;
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x0F, vFlip), cameraTileOffsetX+flip(0x10, hFlip), cameraTileOffsetY+flip(0x0F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x10, hFlip), cameraTileOffsetY+flip(0x0F, vFlip), cameraTileOffsetX+flip(0x10, hFlip), cameraTileOffsetY+flip(0x08, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x10, hFlip), cameraTileOffsetY+flip(0x08, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x08, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x08, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x0F, vFlip), blockColor);
 
-      local sf = bit.band(b, 0x1F);
-      slope[sf]();
-    end,
-    [0x02] = function () -- Air, tricks X-ray
-    end,
-    [0x03] = function () -- Treadmill
-      draw_tile_boundaries(TileX, TileY, 0x80FF40);
-    end,
-    [0x04] = function () -- unused?
-    end,
-    [0x05] = function () -- Horizontal extend
-      stack = stack + 1;
-      local b = memory.readsbyte('BUS', BTS);
-      if stack < 16 and (b ~= 0) then
-        BTS = BTS + b;
-        Clip = Clip + bit.lrshift(b, -1);
-        outline[bit.lrshift(memory.readword('BUS', Clip), 12)]();
-      else
-        draw_tile_boundaries(TileX, TileY, 0xFF00FF);
-      end;
-    end,
-    [0x06] = function () -- unused?
-    end,
-    [0x07] = function () -- unused?
-    end,    
-    [0x08] = function () -- Normal block
-      draw_tile_boundaries(TileX, TileY, 0xFF0000);
-    end,
-    [0x09] = function () -- Transition block
-      door = memory.readword('BUS', 0x8F0000 + memory.readword('BUS', 0x7E07B5) + 2*bit.band(memory.readbyte('BUS', BTS), 0x7F))
-      transition_color = 0x00FFFF;
-      draw_tile_boundaries(TileX, TileY, transition_color);
---[[      
-      if door == 0x8000 then
-        draw_tile_boundaries(TileX, TileY, transition_color);
-      elseif doors[door] then
-        draw_tile_boundaries(TileX, TileY, transition_color);
-      else
-        draw_tile_boundaries(TileX, TileY, transition_color);
-      end
-]]--      
-    end,
-    [0x0A] = function () -- Spike block
-      draw_tile_boundaries(TileX, TileY, 0x0000FF);
-    end,
-    [0x0B] = function () -- Crumble block
-      draw_tile_boundaries(TileX, TileY, 0x0000FF);
-    end,
-    [0x0C] = function () -- Shot block
-      local b = memory.readbyte('BUS', BTS)
-      if b >= 0x40 and b <= 0x43 then
-        draw_tile_boundaries(TileX, TileY, 0xFFA500); -- makes doors orange
-      else
-        draw_tile_boundaries(TileX, TileY, 0x0000FF);
-      end;
-    end,
-    [0x0D] = function ()
-      stack = stack + 1
-      local b = memory.readsbyte('BUS', BTS)
-      if stack < 16 and (b ~= 0) then
-        BTS = BTS + b*width
-        Clip = Clip + bit.lrshift(b*width, -1)
-        outline[bit.lrshift(memory.readword('BUS', Clip), 12)]();
-      else
-        draw_tile_boundaries(TileX, TileY, 0xFF00FF);
-      end
-    end, -- Vertical extend
-    [0x0E] = function ()
-      draw_tile_boundaries(TileX, TileY, 0x0000FF);
-    end, -- Grapple block
-    [0x0F] = function ()
-      draw_tile_boundaries(TileX, TileY, 0x0000FF);
-    end -- Bomb block
-}
-
-function on_paint()
-  --[[
-    lsnes crashes if you attempt to draw the enemy hitboxes on the first couple 
-    frames when there is junk data. Therefore, do not draw anything until later
-  ]]--
-  if (movie.currentframe() >= 8500) then
-    cur_gamemode = memory.readbyte('BUS', 0x7E0998)
-    if cur_gamemode ~= 0x00 then
-      local cameraX, cameraY = bit.band(memory.readword('BUS', 0x7E0AF6)-0x80, 0xFFFF), bit.band(memory.readword('BUS', 0x7E0AFA)-0x70, 0xFFFF)
-      -- these are the co-ordinates of the top-left of the screen
-      if cameraX >= 10000 then
-        cameraX = cameraX-0xFFFF;
-      end;
-      if cameraY >= 10000 then
-        cameraY = cameraY-0xFFFF;
-      end;
-      
-	    draw_room_tiles(cameraX, cameraY);
-      draw_item_drops_and_enemies(cameraX, cameraY);
-      draw_samus_and_projectiles(cameraX, cameraY);
-    end;
-  end;
-end;
-
-function draw_room_tiles(cameraX, cameraY)
-  width = memory.readword('BUS', 0x7E07A5);
-  -- this is how wide the room is in blocks
-  for y=0,14 do
-    for x=0,16 do
-      stack = 0;
-      -- for when garbage data causes extend blocks that make infinite loops
-      TileX, TileY = x*32 - (bit.band(cameraX, 0x000F)*2), y*32 - (bit.band(cameraY, 0x000F)*2);
-      -- this if for pixel-aligning the grid, because the screen doesn't just scroll per block!
-      a = bit.lrshift(bit.band(cameraX+x*16, 0xFFFF), 4) + bit.band(bit.lrshift(bit.band(cameraY+y*16, 0xFFF), 4)*width, 0xFFFF);
-      -- get block's tile number
-      BTS = 0x7F0000 + ((0x6402 + a)%0x10000);
-      -- BTS of block
-      Clip = 0x7F0000 + ((0x0002 + a*2)%0x10000);
-
-      -- clipdata of block
-      local blockType = bit.lrshift(memory.readword('BUS', Clip), 12);
-      if DebugFlag ~= 0 or blockType == 0x09 or blockType == 0x02 then
-        gui.text(TileX+8, TileY+1, string.format("%02X", blockType) , 0xFF0000);
-        gui.text(TileX+8, TileY+12, string.format("%02X",memory.readbyte('BUS', BTS)), 0xFFA500);
-      end
-      outline[blockType]();
-      -- that's for the block's clipdata nibble
-    end
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x07, vFlip), cameraTileOffsetX+flip(0x18, hFlip), cameraTileOffsetY+flip(0x07, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x18, hFlip), cameraTileOffsetY+flip(0x07, vFlip), cameraTileOffsetX+flip(0x18, hFlip), cameraTileOffsetY+flip(0x00, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x18, hFlip), cameraTileOffsetY+flip(0x00, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x00, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x00, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x07, vFlip), blockColor);
+  end,
+  [0x0F] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- tourian escape room 3 stairs
+    gui.line(cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+flip(0x0F, hFlip), cameraTileOffsetY+flip(0x18, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x10, hFlip), cameraTileOffsetY+flip(0x17, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x00, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x00        , cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x1F        , blockColor);
+  end,
+  [0x10] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- four horizontal lines, evenly spaced, unused?
+    gui.line(cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x17, vFlip), cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x17, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x0F, vFlip), cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x0F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x07, vFlip), cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x07, vFlip), blockColor);
+  end,
+  [0x11] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- four vertical lines, evenly spaced, unused?
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x00        , cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x1F        , blockColor);
+    gui.line(cameraTileOffsetX+flip(0x17, hFlip), cameraTileOffsetY+     0x00        , cameraTileOffsetX+flip(0x17, hFlip), cameraTileOffsetY+     0x1F        , blockColor);
+    gui.line(cameraTileOffsetX+flip(0x0F, hFlip), cameraTileOffsetY+     0x00        , cameraTileOffsetX+flip(0x0F, hFlip), cameraTileOffsetY+     0x1F        , blockColor);
+    gui.line(cameraTileOffsetX+flip(0x07, hFlip), cameraTileOffsetY+     0x00        , cameraTileOffsetX+flip(0x07, hFlip), cameraTileOffsetY+     0x1F        , blockColor);
+  end,
+  [0x12] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- 1x1 diagonal, 1/2 solid, covers bottom right by default
+    gui.line(cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x00, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x00        , cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x1F        , blockColor);
+  end,
+  [0x13] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- full tile unmagnet, pushes up by default
+    default_slope(cameraTileOffsetX, cameraTileOffsetY, vFlip);
+  end,
+  [0x14] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- 1x1 diagonal, 1/4 solid, covers bottom right by default
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+flip(0x10, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x10, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x10, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x10, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+  end,
+  [0x15] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- 1x1 diagonal, 3/4 solid, covers bottom right by default
+    gui.line(cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x10, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x0F, vFlip), cameraTileOffsetX+flip(0x0F, hFlip), cameraTileOffsetY+flip(0x00, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x10, hFlip), cameraTileOffsetY+flip(0x00, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x00, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x00        , cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x1F        , blockColor);
+  end,
+  [0x16] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- 2x1 diagonal, wider than it is tall, 1/4 solid, covers bottom right by default
+    gui.line(cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x10, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x10, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+  end,
+  [0x17] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- 2x1 diagonal, wider than it is tall, 3/4 solid, covers bottom right by default
+    gui.line(cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x10, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x0F, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x00, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x00        , cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x1F        , blockColor);
+  end,
+  [0x18] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- 3x1 diagonal, wider than it is tall, 1/6 solid, covers bottom right by default
+    gui.line(cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x15, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x15, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+  end,
+  [0x19] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- 3x1 diagonal, wider than it is tall, 3/6 solid, covers bottom right by default
+    gui.line(cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x15, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x15, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x0A, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x0A, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+  end,
+  [0x1A] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- 3x1 diagonal, wider than it is tall, 5/6 solid, covers bottom right by default
+    gui.line(cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x0A, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x0A, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x00, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x00        , cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x1F        , blockColor);
+  end,
+  [0x1B] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- 1x2 diagonal, taller than it is wide, 1/4 solid, covers bottom right by default
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+flip(0x10, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x10, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x00, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x00        , cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x1F        , blockColor);
+  end,
+  [0x1C] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- 1x2 diagonal, taller than it is wide, 3/4 solid, covers bottom right by default
+    gui.line(cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+flip(0x0F, hFlip), cameraTileOffsetY+flip(0x00, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x10, hFlip), cameraTileOffsetY+flip(0x00, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x00, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x00        , cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x1F        , blockColor);
+  end,
+  [0x1D] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- 1x3 diagonal, taller than it is wide, 1/6 solid, covers bottom right by default
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+flip(0x15, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x15, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x00, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x00        , cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x1F        , blockColor);
+  end,
+  [0x1E] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- 1x3 diagonal, taller than it is wide, 3/6 solid, covers bottom right by default
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+flip(0x0A, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x0A, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+flip(0x15, hFlip), cameraTileOffsetY+flip(0x00, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x15, hFlip), cameraTileOffsetY+flip(0x00, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x00, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x00        , cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x1F        , blockColor);
+  end,
+  [0x1F] = function (cameraTileOffsetX, cameraTileOffsetY, blockColor, hFlip, vFlip) -- 1x3 diagonal, taller than it is wide, 5/6 solid, covers bottom right by default
+    gui.line(cameraTileOffsetX+     0x1F        , cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+     0x00        , cameraTileOffsetY+flip(0x1F, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x00, hFlip), cameraTileOffsetY+flip(0x1F, vFlip), cameraTileOffsetX+flip(0x0A, hFlip), cameraTileOffsetY+flip(0x00, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x0A, hFlip), cameraTileOffsetY+flip(0x00, vFlip), cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+flip(0x00, vFlip), blockColor);
+    gui.line(cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x00        , cameraTileOffsetX+flip(0x1F, hFlip), cameraTileOffsetY+     0x1F        , blockColor);
   end
-  
-  gui.text(0, 0, string.format("cameraX: %03X\ncameraY: %03X\nClip: %X\n", bit.lrshift(bit.band(cameraX, 0xFFF), 4), bit.lrshift(bit.band(cameraY, 0xFFF), 4), 0x7F0002 + (bit.lrshift(bit.band(cameraX, 0xFFF), 4) + bit.lrshift(bit.band(cameraY, 0xFFF), 4)*width)*2), 0x00FFFF);
-end;
+}
 
-function draw_item_drops_and_enemies(cameraX, cameraY)
-  for i=0,18 do
-    -- draw item drops
-    -- Known issue: The drop box shows the frame after the enemy dies, and the drop cannot be collected
-    -- for multiple frames after that. Also, sometimes the box is much bigger than it should be
-    local enabled = memory.readword('BUS', 0x7E1996 + i*2);
-    if enabled ~= 0 then
-      local projectileX, projectileY = memory.readword('BUS', 0x7E1A4B + i*2), memory.readword('BUS', 0x7E1A93 + i*2);
-      local header = memory.readword('BUS', 0x7E1997 + i*2);
-      local pradiusX = memory.readbyte('BUS', 0x860000 + header + 6);
-      local pradiusY = memory.readbyte('BUS', 0x860000 + header + 7);
-      
-      local topleft = {projectileX - cameraX - pradiusX, projectileY - cameraY - pradiusY};
-      local bottomright = {projectileX - cameraX + pradiusX, projectileY - cameraY + pradiusY};
-      gui.rectangle(topleft[1]*2, topleft[2]*2, (bottomright[1]-topleft[1])*2,(bottomright[2] - topleft[2])*2, 1, 0x00FF00, -1);
-    end;
-  end;
 
-  -- draw enemy hitbox
-  local y = 0;
-  local n_enemies = memory.readbyte("WRAM", 0x0E4E);
-  if n_enemies ~= 0 then
-    for j=1,n_enemies do
-      local i = n_enemies - j;
+function draw_enemies(cameraX, cameraY)
+  draw_enemy_projectiles(cameraX, cameraY);
 
-      local enemyOffset = 0x40 * i;
-      local enemyX = memory.readword("WRAM", 0x0F7A + enemyOffset);
-      local enemyY = memory.readword("WRAM", 0x0F7E + enemyOffset);
-      local eradiusX = memory.readword("WRAM", 0x0F82 + enemyOffset);
-      local eradiusY = memory.readword("WRAM", 0x0F84 + enemyOffset);
-      local topleft = {(enemyX - cameraX - eradiusX), (enemyY - cameraY - eradiusY)};
-      local bottomright = {2 * eradiusX, 2 * eradiusY};
-            
-      if bit.band(memory.readbyte("WRAM", 0x0F88 + enemyOffset), 4) == 0 or memory.readbyte("WRAM", 0x0F8A + enemyOffset) == 4 then
-        gui.rectangle(2 * topleft[1], 2 * topleft[2], 2 * bottomright[1], 2 * bottomright[2], 1, 0x808080, -1);
-      else
-        local oamHitboxPointer = memory.readword("WRAM", 0x0F8E + enemyOffset);
-        if oamHitboxPointer ~= 0 then
-          local bank = bit.lshift(memory.readbyte("WRAM", 0x0FA6 + enemyOffset), 0x10);
-          oamHitboxPointer = bank + oamHitboxPointer;
-          local n_oamHitbox = memory.readbyte("BUS", oamHitboxPointer);
-          if n_oamHitbox ~= 0 then
-            for ii=0,n_oamHitbox-1 do
-              local entryPointer = oamHitboxPointer + 2 + ii*8;
-              local entryXOffset = memory.readsword("BUS", entryPointer+0);
-              local entryYOffset = memory.readsword("BUS", entryPointer+2);
-              local entryHitboxPointer = memory.readword("BUS", entryPointer+6);
-
-              if entryHitboxPointer ~= 0 then
-                entryHitboxPointer = bank + entryHitboxPointer;
-                local n_hitbox = memory.readbyte("BUS", entryHitboxPointer);
-                if n_hitbox ~= 0 then
-                  for iii=0,n_hitbox-1 do
-                    local entryLeft   = memory.readsword("BUS", entryHitboxPointer + 2 + iii*12 + 0);
-                    local entryTop    = memory.readsword("BUS", entryHitboxPointer + 2 + iii*12 + 2);
-                    local entryRight  = memory.readsword("BUS", entryHitboxPointer + 2 + iii*12 + 4);
-                    local entryBottom = memory.readsword("BUS", entryHitboxPointer + 2 + iii*12 + 6);
-
-                    gui.rectangle(
-                      2 * (enemyX - cameraX + entryXOffset + entryLeft),
-                      2 * (enemyY - cameraY + entryYOffset + entryTop),
-                      2 * (entryRight - entryLeft),
-                      2 * (entryBottom - entryTop),
-                      1, 0x808080, -1);
-                  end;
-                end;
-              end;
-            end;
-          end;
-        end;
-      end;
-      
-      -- show enemy slot and ID
-      gui.text(2*topleft[1], 2*topleft[2], string.format("%2d: %04X", i, memory.readword("WRAM", 0x0F78 + i*64)), 0x808080);
-      gui.text(2*224, y, string.format("%2d: %04X", i, memory.readword("WRAM", 0x0F78 + i*64)), 0x808080);
-      y = y + 11;
-      
-      -- show enemy health
-      local enemyspawnhealth = memory.readword("BUS", 0xA00004 + memory.readword("WRAM", 0x0F78 + enemyOffset));
-      if enemyspawnhealth ~= 0 then
-        local enemyhealth = memory.readword("WRAM", 0x0F8C + enemyOffset);
-        gui.text(2 * topleft[1], 2 * (topleft[2]-16), enemyhealth .. "/" .. enemyspawnhealth, 0x808080);
-        
-        if enemyhealth ~= 0 then -- draw enemy health bar
-          gui.solidrectangle(2*topleft[1], 2*(topleft[2]-8), 2*math.floor(enemyhealth/enemyspawnhealth*32), 2*(3), 0x606060);
-          gui.rectangle(2*topleft[1], 2*(topleft[2]-8), 2*(32), 2*(3), 1, 0x808080, -1);
-        end;
-      end;
+  local enemyCount = memory.readbyte(WRAM, 0x0E4E);
+  if (enemyCount > 0)
+  then
+    for enemyNumber=0,(enemyCount-1)
+    do
+      draw_enemy(enemyNumber, cameraX, cameraY);
     end;
   end;
 end;
 
--- Make Samus' hitbox change color based on environmental friction
-local SAMUS_X_LAST = 0x00000000;
-local SAMUS_X_THIS = 0x00000000;
-local ACTUAL_DISTANCE = 0x00000000;
-local EXPECTED_DISTANCE = 0x00000000;
-local SAMUS_HITBOX_COLOR = 0x80FFFF;
+function draw_enemy_projectiles(cameraX, cameraY) -- this includes item drops as well
+  for enemyProjectileOffset=0,34,2
+  do
+    local enemyProjectileId = memory.readword(WRAM, (enemyProjectileOffset + 0x1997));
+    local enemyProjectileTimer = memory.readword(WRAM, (enemyProjectileOffset + 0x19DF));
+    local enemyProjectilePreInstruction = memory.readword(WRAM, (enemyProjectileOffset + 0x1A03)); -- item drop collected if preInstruction is 0xEFDF
+    if ((enemyProjectileId ~= 0) and (enemyProjectileTimer == 0) and (enemyProjectilePreInstruction ~= 0xEFDF))
+    then
+      local header = memory.readword(WRAM, (enemyProjectileOffset + 0x1997));
 
-function on_frame() 
-  SAMUS_X_LAST = (0x10000 * memory.readword("WRAM", 0x0AF6)) + memory.readword("WRAM", 0x0AF8);
+      local enemyProjectileX = memory.readword(WRAM, (enemyProjectileOffset + 0x1A4B));
+      local enemyProjectileY = memory.readword(WRAM, (enemyProjectileOffset + 0x1A93));
+
+      local enemyProjectileRadiusX = memory.readbyte(ROM, (BANK_OFFSET_86 + header + 6));
+      local enemyProjectileRadiusY = memory.readbyte(ROM, (BANK_OFFSET_86 + header + 7));
+
+      local enemyProjectileLeft   = bit.lshift((enemyProjectileX - cameraX - enemyProjectileRadiusX), 1);
+      local enemyProjectileTop    = bit.lshift((enemyProjectileY - cameraY - enemyProjectileRadiusY), 1);
+      local enemyProjectileWidth  = bit.lshift(enemyProjectileRadiusX, 2);
+      local enemyProjectileHeight = bit.lshift(enemyProjectileRadiusY, 2);
+
+      gui.rectangle(enemyProjectileLeft, enemyProjectileTop, enemyProjectileWidth, enemyProjectileHeight, 1, COLOR_ITEM_DROP, -1);
+    end;
+  end;
 end;
-function on_frame_emulated() 
-  SAMUS_X_LAST = SAMUS_X_THIS;
-  SAMUS_X_THIS = (0x10000 * memory.readword("WRAM", 0x0AF6)) + memory.readword("WRAM", 0x0AF8);
 
-  if (SAMUS_X_THIS < SAMUS_X_LAST) then ACTUAL_DISTANCE = (SAMUS_X_LAST - SAMUS_X_THIS); else ACTUAL_DISTANCE = (SAMUS_X_THIS - SAMUS_X_LAST); end;
-  EXPECTED_DISTANCE = (0x10000 * (memory.readword("WRAM", 0x0B42) + memory.readword("WRAM", 0x0B46))) + (memory.readword("WRAM", 0x0B44) + memory.readword("WRAM", 0x0B48));
-  
-  if (ACTUAL_DISTANCE > EXPECTED_DISTANCE) -- arm pumping
+function draw_enemy(enemyNumber, cameraX, cameraY)
+  local enemyOffset = bit.lshift(enemyNumber, 6);
+  local enemyId = memory.readword(WRAM, (enemyOffset + 0x0F78));
+
+  if (enemyId ~= 0)
   then
-    SAMUS_HITBOX_COLOR = 0x00FF00;
-  elseif (ACTUAL_DISTANCE == EXPECTED_DISTANCE)
+    local enemyX = memory.readword(WRAM, (enemyOffset + 0x0F7A));
+    local enemyY = memory.readword(WRAM, (enemyOffset + 0x0F7E));
+
+    local enemyRadiusX = memory.readword(WRAM, (enemyOffset + 0x0F82));
+    local enemyRadiusY = memory.readword(WRAM, (enemyOffset + 0x0F84));
+
+    local enemyRelativeX = (enemyX - cameraX);
+    local enemyRelativeY = (enemyY - cameraY);
+
+    local enemyLeft   = bit.lshift((enemyRelativeX - enemyRadiusX), 1);
+    local enemyTop    = bit.lshift((enemyRelativeY - enemyRadiusY), 1);
+    local enemyWidth  = bit.lshift(enemyRadiusX, 2);
+    local enemyHeight = bit.lshift(enemyRadiusY, 2);
+
+    draw_enemy_hitboxes(enemyOffset, enemyLeft, enemyTop, enemyWidth, enemyHeight, enemyRelativeX, enemyRelativeY);
+    draw_enemy_data(enemyNumber, enemyOffset, enemyId, enemyLeft, enemyTop);
+  end;
+end;
+
+function draw_enemy_hitboxes(enemyOffset, enemyLeft, enemyTop, enemyWidth, enemyHeight, enemyRelativeX, enemyRelativeY)
+  local enemyProperties = memory.readbyte(WRAM, (enemyOffset + 0x0F88));
+  local enemyAiHandler = memory.readbyte(WRAM, (enemyOffset + 0x0F8A));
+
+  if (bit.testn(enemyProperties, 2) or (enemyAiHandler == 4))
   then
-    SAMUS_HITBOX_COLOR = 0x80FFFF;
-  elseif ((4 * ACTUAL_DISTANCE) > (3 * EXPECTED_DISTANCE))
-  then
-    SAMUS_HITBOX_COLOR = 0xFF8000;
-  elseif ((4 * ACTUAL_DISTANCE) > (2 * EXPECTED_DISTANCE))
-  then
-    SAMUS_HITBOX_COLOR = 0xFF0000;
+    gui.rectangle(enemyLeft, enemyTop, enemyWidth, enemyHeight, 1, COLOR_ENEMY, -1);
   else
-    SAMUS_HITBOX_COLOR = 0x800000;
+    draw_enemy_oam_hitboxes(enemyOffset, enemyRelativeX, enemyRelativeY);
   end;
 end;
-function draw_samus_and_projectiles(cameraX, cameraY)
-  for i=0,9 do
-    -- draw projectile hitbox
-    local projectileX, projectileY = memory.readword('BUS', 0x7E0B64 + i*2), memory.readword('BUS', 0x7E0B78 + i*2)
-    local pradiusX, pradiusY = memory.readsword('BUS', 0x7E0BB4 + i*2), memory.readsword('BUS', 0x7E0BC8 + i*2)
-    local topleft = {projectileX - cameraX - pradiusX, projectileY - cameraY - pradiusY}
-    local bottomright = {projectileX - cameraX + pradiusX, projectileY - cameraY + pradiusY}
-    gui.rectangle(topleft[1]*2, topleft[2]*2, (bottomright[1]-topleft[1])*2,(bottomright[2] - topleft[2])*2, 1, 0xFFFF80, -1)
+function draw_enemy_oam_hitboxes(enemyOffset, enemyRelativeX, enemyRelativeY)
+  local oamHitboxPointer = memory.readword(WRAM, (enemyOffset + 0x0F8E));
+  if (oamHitboxPointer ~= 0)
+  then
+    local bank = memory.readbyte(WRAM, (enemyOffset + 0x0FA6));
+    local bankOffset = bit.lshift((bank - 0x80 - 0x01), 15);
+    oamHitboxPointer = oamHitboxPointer + bankOffset;
+    local oamHitboxCount = memory.readbyte(ROM, oamHitboxPointer);
 
-    -- show projectile damage
-    gui.text(tonumber(topleft[1])*2, tonumber(topleft[2]-8)*2, memory.readword('BUS', 0x7E0C2C + i*2), 0xFFFF80)
-    
-    -- show bomb timer
-    if i >= 5 then
-      gui.text(tonumber(topleft[1])*2, tonumber(topleft[2]-16)*2, memory.readbyte('BUS', 0x7E0C7C + i*2), 0xFFFF80)
+    if (oamHitboxCount ~= 0)
+    then
+      for oamHitbox=0,(oamHitboxCount-1)
+      do
+        draw_enemy_oam_hitbox(oamHitboxPointer, oamHitbox, bankOffset, enemyRelativeX, enemyRelativeY);
+      end;
+    end;
+  end;
+end;
+function draw_enemy_oam_hitbox(oamHitboxPointer, oamHitbox, bankOffset, enemyRelativeX, enemyRelativeY)
+  local entryPointer = (bit.lshift(oamHitbox, 3) + oamHitboxPointer + 2);
+  local entryHitboxPointer = memory.readword(ROM, (entryPointer+6));
+  if (entryHitboxPointer ~= 0)
+  then
+    entryHitboxPointer = bankOffset + entryHitboxPointer;
+    local hitboxCount = memory.readbyte(ROM, entryHitboxPointer);
+
+    if (hitboxCount ~= 0)
+    then
+      for hitboxNumber=0,(hitboxCount-1)
+      do
+        draw_enemy_hitbox(entryHitboxPointer, hitboxNumber, entryPointer, enemyRelativeX, enemyRelativeY)
+      end;
+    end;
+  end;
+end;
+function draw_enemy_hitbox(entryHitboxPointer, hitboxNumber, entryPointer, enemyRelativeX, enemyRelativeY)
+  local hitboxOffset = (entryHitboxPointer + 2 + multiply_by_twelve(hitboxNumber));
+
+  local entryLeft   = memory.readword(ROM, (hitboxOffset + 0));
+  local entryTop    = memory.readword(ROM, (hitboxOffset + 2));
+  local entryRight  = memory.readword(ROM, (hitboxOffset + 4));
+  local entryBottom = memory.readword(ROM, (hitboxOffset + 6));
+
+  local entryOffsetX = memory.readword(ROM, entryPointer + 0);
+  local entryOffsetY = memory.readword(ROM, entryPointer + 2);
+
+  local hitboxLeft   = bit.lshift(bit.band((enemyRelativeX + entryOffsetX + entryLeft), 0xFFFF), 1);
+  local hitboxTop    = bit.lshift(bit.band((enemyRelativeY + entryOffsetY + entryTop ), 0xFFFF), 1);
+  local hitboxWidth  = bit.lshift(bit.band((entryRight - entryLeft), 0xFFFF), 1);
+  local hitboxHeight = bit.lshift(bit.band((entryBottom - entryTop), 0xFFFF), 1);
+
+  gui.rectangle(hitboxLeft, hitboxTop, hitboxWidth, hitboxHeight, 1, COLOR_ENEMY, -1);
+end;
+
+function draw_enemy_data(enemyNumber, enemyOffset, enemyId, enemyLeft, enemyTop)
+  local enemyData = string.format("%2d: %04X", enemyNumber, enemyId);
+  gui.text(SCREEN_X_ENEMY_SUMMARY, multiply_by_twelve(enemyNumber), enemyData, COLOR_ENEMY);
+
+  local enemyHealth = memory.readword(WRAM, 0x0F8C + enemyOffset);
+  local enemySpawnHealth = memory.readword(ROM, (BANK_OFFSET_A0 + (enemyId + 4)));
+  if (enemySpawnHealth ~= 0) and (enemyHealth ~= 0)
+  then
+    local enemyHealthData = enemyHealth .. "/" .. enemySpawnHealth;
+    gui.text(enemyLeft, enemyTop, enemyData, COLOR_ENEMY);
+    gui.text(enemyLeft, (enemyTop - 0x20), enemyHealthData, COLOR_ENEMY);
+
+    local enemyHealthPercent = math.floor((ENEMY_HEALTH_BAR_WIDTH * enemyHealth) / enemySpawnHealth);
+
+    gui.solidrectangle(enemyLeft, (enemyTop - 0x10), enemyHealthPercent, ENEMY_HEALTH_BAR_HEIGHT, COLOR_ENEMY_HEALTH_BAR);
+    gui.rectangle(enemyLeft, (enemyTop - 0x10), ENEMY_HEALTH_BAR_WIDTH, ENEMY_HEALTH_BAR_HEIGHT, 1, COLOR_ENEMY, -1);
+  end;
+end;
+function multiply_by_twelve(input)
+  return (bit.lshift(input, 3) + bit.lshift(input, 2));
+end;
+
+function draw_samus(cameraX, cameraY)
+  draw_samus_projectiles(cameraX, cameraY);
+  draw_samus_bombs(cameraX, cameraY);
+  draw_samus_hitbox();
+end;
+
+function draw_samus_projectiles(cameraX, cameraY)
+  for projectileOffset=0,8,2
+  do
+    draw_samus_projectile(projectileOffset, cameraX, cameraY)
+  end;
+end;
+function draw_samus_projectile(projectileOffset, cameraX, cameraY)
+  local projectileDamage = memory.readword(WRAM, (0x0C2C + projectileOffset));
+  if (projectileDamage > 8)
+  then
+    local projectileX = memory.readword(WRAM, (0x0B64 + projectileOffset));
+    local projectileY = memory.readword(WRAM, (0x0B78 + projectileOffset));
+
+    local projectileRadiusX = memory.readword(WRAM, (0x0BB4 + projectileOffset));
+    local projectileRadiusY = memory.readword(WRAM, (0x0BC8 + projectileOffset));
+
+    local projectileLeft   = bit.lshift((projectileX - cameraX - projectileRadiusX), 1);
+    local projectileTop    = bit.lshift((projectileY - cameraY - projectileRadiusY), 1);
+    local projectileWidth  = bit.lshift(projectileRadiusX, 2);
+    local projectileHeight = bit.lshift(projectileRadiusY, 2);
+
+    gui.text(projectileLeft, (projectileTop - 16), projectileDamage, COLOR_SAMUS_PROJECTILES);
+    gui.rectangle(projectileLeft, projectileTop, projectileWidth, projectileHeight, 1, COLOR_SAMUS_PROJECTILES, -1);
+  end;
+end;
+
+function draw_samus_bombs(cameraX, cameraY)
+  for bombOffset=0,8,2
+  do
+    draw_samus_bomb(bombOffset, cameraX, cameraY)
+  end;
+end;
+function draw_samus_bomb(bombOffset, cameraX, cameraY)
+  local bombTimer = memory.readword(WRAM, (0x0C86 + bombOffset));
+  if (bombTimer ~= 0)
+  then
+    local bombX = memory.readword(WRAM, (0x0B6E + bombOffset));
+    local bombY = memory.readword(WRAM, (0x0B82 + bombOffset));
+
+    local bombRadiusX = memory.readword(WRAM, (0x0BBE + bombOffset));
+    local bombRadiusY = memory.readword(WRAM, (0x0BD2 + bombOffset));
+
+    local bombLeft   = bit.lshift((bombX - cameraX - bombRadiusX), 1);
+    local bombTop    = bit.lshift((bombY - cameraY - bombRadiusY), 1);
+    local bombWidth  = bit.lshift(bombRadiusX, 2);
+    local bombHeight = bit.lshift(bombRadiusY, 2);
+
+    local bombDamage = memory.readword(WRAM, (0x0C36 + bombOffset));
+    gui.text(bombLeft, (bombTop - 32), bombDamage, COLOR_SAMUS_BOMBS);
+    gui.text(bombLeft, (bombTop - 16), bombTimer, COLOR_SAMUS_BOMBS);
+    gui.rectangle(bombLeft, bombTop, bombWidth, bombHeight, 1, COLOR_SAMUS_BOMBS, -1);
+  end;
+end;
+
+function draw_samus_hitbox()
+  local samusRadiusX = memory.readword(WRAM, 0x0AFE);
+  local samusRadiusY = memory.readword(WRAM, 0x0B00);
+
+  local samusLeft  = bit.lshift((SCREEN_X_HALF - samusRadiusX), 1);
+  local samusRight = bit.lshift((SCREEN_X_HALF + samusRadiusX), 1);
+  local samusTop   = bit.lshift((SCREEN_Y_HALF - samusRadiusY), 1);
+
+  local samusWidth  = bit.lshift(samusRadiusX, 2);
+  local samusHeight = bit.lshift(samusRadiusY, 2);
+
+  draw_samus_data(samusRight);
+
+  local samusHitboxColor = calculate_samus_hitbox_color();
+  gui.rectangle(samusLeft, samusTop, samusWidth, samusHeight, 1, samusHitboxColor, -1);
+end;
+function calculate_samus_hitbox_color()
+  local actualDistance = 0x00000000;
+  if (SAMUS_X_NEXT < SAMUS_X_LAST)
+  then
+    actualDistance = (SAMUS_X_LAST - SAMUS_X_NEXT);
+  else
+    actualDistance = (SAMUS_X_NEXT - SAMUS_X_LAST);
+  end;
+  local expectedDistance = (bit.lshift((memory.readword(WRAM, 0x0B42) + memory.readword(WRAM, 0x0B46)), 0x10) + (memory.readword(WRAM, 0x0B44) + memory.readword(WRAM, 0x0B48)));
+
+  if (actualDistance > expectedDistance) -- arm pumping
+  then
+    return COLOR_SAMUS_HITBOX_FASTEST;
+  elseif (actualDistance == expectedDistance)
+  then
+    return COLOR_SAMUS_HITBOX_FASTER;
+  else
+    local actualDistanceQuadrupled = bit.lshift(actualDistance, 2);
+    local expectedDistanceDoubled = (bit.lshift(expectedDistance, 1));
+
+    if (actualDistanceQuadrupled > (expectedDistanceDoubled + expectedDistance))
+    then
+      return COLOR_SAMUS_HITBOX_AVERAGE;
+    elseif (actualDistanceQuadrupled > expectedDistanceDoubled)
+    then
+      return COLOR_SAMUS_HITBOX_SLOWER;
+    else
+      return COLOR_SAMUS_HITBOX_SLOWEST;
+    end;
+  end;
+end;
+
+function draw_samus_data(samusRight)
+  local cooldown = memory.readword(WRAM, 0x0CCC);
+  if (cooldown ~= 0)
+  then
+    gui.text(samusRight, bit.lshift((SCREEN_Y_HALF - 16)), cooldown, 0x00FF00);
+  end;
+
+  local charge = memory.readword(WRAM, 0x0CD0);
+  if (charge ~= 0)
+  then;
+    gui.text(samusRight, bit.lshift((SCREEN_Y_HALF - 8)), charge, 0x00FF00);
+  end;
+
+  local recoil = memory.readword(WRAM, 0x18AA);
+  if (recoil ~= 0)
+  then
+    gui.text(samusRight, bit.lshift((SCREEN_Y_HALF)), recoil, 0x00FFFF)
+  else
+    local invincibility = memory.readword(WRAM, 0x18A8);
+    if (invincibility ~= 0)
+    then
+      gui.text(samusRight, bit.lshift((SCREEN_Y_HALF)), invincibility, 0x00FFFF)
     end;
   end;
 
-  -- draw Samus' hitbox
-  local radiusX, radiusY = memory.readsword('BUS', 0x7E0AFE), memory.readsword('BUS', 0x7E0B00);
-  local topleft = {128 - radiusX, 112 - radiusY};
-  local bottomright = {128 + radiusX, 112 + radiusY};
-  gui.rectangle(topleft[1]*2,topleft[2]*2, (bottomright[1]-topleft[1])*2,(bottomright[2]-topleft[2])*2, 1, SAMUS_HITBOX_COLOR, -1);
-
-  -- show current cooldown time
-  local cooldown = memory.readword('BUS', 0x7E0CCC);
-  if cooldown ~= 0 then
-    gui.text(bottomright[1]*2, math.floor((topleft[2]+bottomright[2])/2-16)*2, cooldown, 0x00FF00);
+  local shine = memory.readbyte(WRAM, 0x0A68);
+  if (shine ~= 0)
+  then
+    gui.text(samusRight, bit.lshift((SCREEN_Y_HALF + 8)), shine, 0x00FFFF);
   end;
-  
-  -- show current beam charge
-  local charge = memory.readword('BUS', 0x7E0CD0);
-  if charge ~= 0 then;
-    gui.text(bottomright[1]*2, math.floor((topleft[2]+bottomright[2])/2-8)*2, charge, 0x00FF00);
-  end;
-  
-  -- show recoil/invincibility
-  local recoil, invincibility = memory.readword('BUS', 0x7E18AA), memory.readword('BUS', 0x7E18A8);
-  if recoil ~= 0 then
-    gui.text(bottomright[1]*2, math.floor((topleft[2]+bottomright[2])/2)*2, recoil, 0x00FFFF)
-  elseif invincibility ~= 0 then
-    gui.text(bottomright[1]*2, math.floor((topleft[2]+bottomright[2])/2)*2, invincibility, 0x00FFFF)
-  end;
-    
-  local shine = memory.readbyte('BUS', 0x7E0A68);
-  if shine ~= 0 then
-    gui.text(bottomright[1]*2, math.floor((topleft[2]+bottomright[2])/2+8)*2, shine, 0x00FFFF);
-  end;
-      
-  --if TASFlag ~= 0 then
-    -- show horizontal speed
-    --gui.text(topleft[1], topleft[2]-28, string.format("%X.%04X", memory.readword('BUS', 0x7E0B42), memory.readword('BUS', 0x7E0B44)), 0x00FFFF)
-    
-    -- show horizontal momentum
-    --gui.text(topleft[1], topleft[2]-16, string.format("%X.%04X", memory.readword('BUS', 0x7E0B46), memory.readword('BUS', 0x7E0B48)), 0x00FFFF)
-    
-    -- show vertical speed
-    --gui.text(topleft[1], bottomright[2]-4, string.format("%X.%04X", memory.readword('BUS', 0x7E0B2E), memory.readword('BUS', 0x7E0B2C)), 0x00FFFF)
-    
-    -- show speed booster level
-    --gui.text(topleft[1], bottomright[2]+10, memory.readbyte('BUS', 0x7E0B3F), "#00FFFF")
-    
-    -- show in-game time
-    -- TODO: the newly added enemy IDs from the enemy hitbox script will interfere with this text now
-    --gui.text(216, 0, string.format("%d:%d:%d.%d", memory.readword('BUS', 0x7E09E0), memory.readword('BUS', 0x7E09DE), memory.readword('BUS', 0x7E09DC), memory.readword('BUS', 0x7E09DA)), 0xFFFFFF)
-  --end
 end;
